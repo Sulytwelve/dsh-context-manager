@@ -1,9 +1,15 @@
-# Cross-session memory
+# DSH Context Manager
 
-A durable memory layer for DeepSeek Harness coding sessions. It keeps a small
-curated set of **scoped, evidence-bearing records** plus one **task checkpoint
-per working directory**, recalls them just before a model decision, and retires
-them when a cheap probe shows they no longer hold.
+Context management for DeepSeek Harness coding sessions. It keeps a small
+curated set of **scoped, evidence-bearing memory records** plus one **task
+checkpoint per working directory**, recalls them just before a model decision,
+and retires them when a cheap probe shows they no longer hold.
+
+This is a product rename, not a re-architecture: the package
+(`@sulytwelve/dsh-memory-astra62`), the three row ids, the `memory` tool, and the
+`agent_memory` storage domain are unchanged, so existing installs,
+configurations, and records keep working. The word "memory" below still means a
+memory record, its storage, or the recall mechanism.
 
 ## Why it is split into three rows
 

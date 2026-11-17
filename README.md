@@ -1,8 +1,14 @@
-# dsh-memory-astra62
+# DSH Context Manager
 
-Cross-session memory for **DeepSeek Harness** (DSH): durable, scoped records
-plus one task checkpoint per working directory, recalled just before a model
-decision and retired when a cheap probe shows they no longer hold.
+**Context management for DeepSeek Harness (DSH).** It recalls relevant project
+knowledge on demand, revalidates the evidence behind it, and restores a task that
+was left unfinished in another session.
+
+The package name is still `@sulytwelve/dsh-memory-astra62`: the product was
+renamed, the npm identity, row ids, the `memory` tool, and the `agent_memory`
+storage domain were not, so existing installs, configurations, and records keep
+working. The implementation vocabulary stays "memory" wherever it means a
+memory record, its storage, or the recall mechanism.
 
 - **No embeddings, no vector database.** Retrieval scores the record's *trigger*
   — the situation it claims to apply to — against the current prompt using
@@ -13,6 +19,10 @@ decision and retired when a cheap probe shows they no longer hold.
   normalized `project` directory, or one `session` id — and dedupe, index
   rebuild, and recall all use that same identity. Two projects recording the
   same trigger stay two records.
+- **Evidence, not just text.** A record can carry a probe; a due probe is re-run
+  before the record may enter the context, and a failing one retires it. The
+  packet says what class of evidence backs each line and when it was last
+  checked.
 - **No model calls on the hot path.** `memory-core` adds one in-memory scoring
   pass at the first step of a turn and a bounded probe of at most five due
   records.
@@ -55,19 +65,20 @@ the cached module generation.
 
 Ask the agent:
 
-> Install the plugin bundle from `https://github.com/Sulytwelve/dsh-memory-astra62`
+> Install the plugin bundle from `https://github.com/Sulytwelve/dsh-context-manager`
 > and enable it.
 
 The agent runs:
 
 ```text
 plugin_manager action=install_bundle
-               target=https://github.com/Sulytwelve/dsh-memory-astra62
+               target=https://github.com/Sulytwelve/dsh-context-manager
 ```
 
-`github:Sulytwelve/dsh-memory-astra62` and `github:Sulytwelve/dsh-memory-astra62#v1.0.0`
-work the same way. The manager installs the package into the current DSH
-profile and selects the bundle, so the three rows appear in **Plugins**.
+`github:Sulytwelve/dsh-context-manager` and
+`github:Sulytwelve/dsh-context-manager#v1.1.5` work the same way. The manager
+installs the package into the current DSH profile and selects the bundle, so the
+three rows appear in **Plugins**.
 
 The install runs `pnpm` **inside the DSH process**, so it uses that process's
 network and proxy environment, not your shell's. On a machine where GitHub needs
@@ -89,7 +100,7 @@ dsh plugin --profile <profile> add @sulytwelve/dsh-memory-astra62
 
 ### Verify
 
-- `Plugins` lists **Cross-session memory** with three rows.
+- `Plugins` lists **DSH Context Manager** with three rows.
 - In a new session the model has a `memory` tool.
 - `memory{op:"status"}` prints counters; after a turn ends,
   `memory{op:"resume"}` prints the checkpoint for the working directory.
@@ -261,7 +272,9 @@ BSD-2-Clause. Copyright (c) 2026, Sulytwelve.
 
 ## 中文快速开始
 
-1. 对正在运行的 agent 说：**安装 `https://github.com/Sulytwelve/dsh-memory-astra62` 这个插件包并启用**。
+**DSH 上下文管理器**：为 DeepSeek Harness 提供上下文管理——按需召回相关项目知识、复核知识背后的证据、恢复跨会话任务。展示名已改为「DSH 上下文管理器」，但**包名、三行 row id、`memory` 工具名和 `agent_memory` 存储域保持不变**，已有安装、配置和数据可以继续使用；下文技术描述里指“记忆记录/存储/召回机制”时仍用 memory。
+
+1. 对正在运行的 agent 说：**安装 `https://github.com/Sulytwelve/dsh-context-manager` 这个插件包并启用**。
    agent 会执行 `plugin_manager install_bundle`，三行插件随即出现在「插件」页。
 2. 新开会话，模型即拥有 `memory` 工具。
 

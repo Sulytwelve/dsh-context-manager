@@ -1,7 +1,7 @@
 {
   "name": "@sulytwelve/dsh-memory-astra62",
-  "version": "1.1.4",
-  "description": "Cross-session memory for DeepSeek Harness: durable recall, verified task checkpoints, guarded probes, and adaptive distillation, split into independently toggleable perf tiers.",
+  "version": "1.1.5",
+  "description": "DSH Context Manager: context management for DeepSeek Harness — on-demand recall of project knowledge, evidence revalidation, and cross-session task resumption, split into independently toggleable perf tiers.",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -14,11 +14,11 @@
   "author": "Sulytwelve",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Sulytwelve/dsh-memory-astra62.git"
+    "url": "git+https://github.com/Sulytwelve/dsh-context-manager.git"
   },
-  "homepage": "https://github.com/Sulytwelve/dsh-memory-astra62#readme",
+  "homepage": "https://github.com/Sulytwelve/dsh-context-manager#readme",
   "bugs": {
-    "url": "https://github.com/Sulytwelve/dsh-memory-astra62/issues"
+    "url": "https://github.com/Sulytwelve/dsh-context-manager/issues"
   },
   "type": "module",
   "exports": {
