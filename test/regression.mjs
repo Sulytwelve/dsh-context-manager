@@ -385,5 +385,51 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
   })
 }
 
+// ------------------------------------------------------- packet evidence marker
+
+{
+  const { store } = makeStore()
+  const dir = join(root, 'marker')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'marker.txt'), 'ok\n')
+
+  const first = await store.write({
+    scope: 'project',
+    kind: 'procedure',
+    trigger: 'checking the marker file before a release',
+    claim: 'The marker file must contain the literal ok before the release check runs.',
+    evidence: 'marker.txt',
+    confidence: 0.9,
+    cwd: dir,
+    origin: 'test',
+    probe: { kind: 'file-contains', target: 'marker.txt', pattern: 'ok' },
+  })
+  await store.markProbe(first.record.id, true, 'contains ok')
+  await store.write({
+    scope: 'project',
+    kind: 'procedure',
+    trigger: 'verifying the release command in this repository',
+    claim: 'The release command was run against the fixture and exited zero.',
+    evidence: 't2(pwsh)',
+    support: { class: 'verified', refs: [{ ref: 't2', tool: 'pwsh' }] },
+    confidence: 0.6,
+    cwd: dir,
+    origin: 'distill:short',
+  })
+
+  const checked = store.recall({ query: 'checking the marker file before a release', cwd: dir })
+  check('a checked record reports when its evidence was verified', () => {
+    assert.equal(checked.items.length, 1)
+    assert.match(checked.items[0].line, /·checked /)
+  })
+
+  const supported = store.recall({ query: 'verifying the release command', cwd: dir })
+  check('a distilled record reports the class of evidence behind it', () => {
+    assert.equal(supported.items.length, 1)
+    assert.match(supported.items[0].line, /verified/)
+    assert.match(supported.items[0].line, /0\.60 verified/)
+  })
+}
+
 rmSync(root, { recursive: true, force: true })
 check.report('regression')
