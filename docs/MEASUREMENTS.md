@@ -162,6 +162,38 @@ Session A's span is the ledger's first-to-last activity (7.9 s); `bench/analyze.
 now reports from the admitted prompt rather than from seeded rows such as
 `permission/preset`, whose timestamps predate the session.
 
+## Control: same tool schema, no automatic recall
+
+The control condition the earlier section asked for, run on the same fixture and
+the same one-line prompt as the treatment:
+
+> *In this repository, what exact command runs the full test suite, and which
+> environment variable enables the slow fixtures? Answer with only those two
+> lines.*
+
+| run | recall | model calls | uncached in | cached in | out | total | wall | injection |
+|---|---|---|---|---|---|---|---|---|
+| Y (GUI) | **on** | 3 | 2,247 | 33,920 | 179 | **36,346** | 2.9 s | 151 tok |
+| X (GUI, invalid control) | **on** (switch was a no-op) | 2 | 1,072 | 22,656 | 131 | **23,859** | 2.4 s | 151 tok |
+| C (re-run after the fix) | **off** | 4 | 2,837 | 48,896 | 693 | **52,426** | 7.0 s | none |
+
+- Treatment mean **30,103** against control **52,426** (−43% volume, −25% to −50%
+  calls depending on the sample, −59% wall for the slower treatment sample).
+  Both runs answered exactly the two expected lines.
+- **n is small and the treatment varies**: the two recall-on runs differ by 3
+  steps vs 2 steps purely in how much the model chose to verify. The direction is
+  consistent, the magnitude is not settled.
+- The tool schema (≈538 tok/request) is present in every row, so the delta
+  isolates automatic injection, not mount cost.
+- X is kept in the table as a *second treatment sample*, not a control. It was
+  meant to be the control, but `recall.enabled: false` was a no-op: the
+  `agent/pre-step` listener never checked the flag, so it injected anyway
+  (`·checked 2m` is visible in its trajectory). The switch is now enforced
+  before registration, with a regression case; row C is the re-run after that
+  fix.
+- C's tool calls were not captured (its session log had not been flushed), so
+  only its ledger counters are reported.
+
 ## Conditional execution — the packet has to earn its place
 
 A trivial prompt (`"Compute 17 * 23"`) in the fixture directory, which has a

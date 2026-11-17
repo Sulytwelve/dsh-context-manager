@@ -402,8 +402,23 @@ export function buildPacket(store, options) {
   return { ...result, text: body, tokens: estimateTokens(body), used: lines.length }
 }
 
+/**
+ * Whether the automatic recall listener should exist at all.
+ *
+ * Exported so the switch itself is testable: it was documented and printed in
+ * the boot line while the listener ignored it, which silently invalidated a
+ * control run.
+ */
+export function recallEnabled(config) {
+  return config?.recall?.enabled !== false
+}
+
 function registerRecall(ctx, store, config) {
   const recall = config.recall
+  if (!recallEnabled(config)) {
+    ctx.logger?.info?.('[memory] automatic recall disabled by config')
+    return
+  }
   ctx.on('agent/pre-step', async (payload, next) => {
     const decision = await next()
     if (decision.kind === 'reject' || payload.signal?.aborted) return decision

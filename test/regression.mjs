@@ -14,6 +14,7 @@ import { join } from 'node:path'
 
 import { probeDue, selectProbeCandidates } from '../lib/probe-plan.js'
 import { evaluateSupport, toolClass } from '../lib/support.js'
+import { recallEnabled } from '../index.js'
 import { createChecker, makeStore, reopen } from './harness.mjs'
 
 const check = createChecker()
@@ -447,6 +448,17 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.match(supported.items[0].line, /0\.60 verified/)
   })
 }
+
+// ---------------------------------------------------------------- config gate
+
+check('recall.enabled: false really disables the recall listener', () => {
+  // Documented, printed in the boot line, and previously ignored: the listener
+  // ran anyway, which silently invalidated a control run.
+  assert.equal(recallEnabled({ recall: { enabled: false } }), false)
+  assert.equal(recallEnabled({ recall: {} }), true)
+  assert.equal(recallEnabled({}), true)
+  assert.equal(recallEnabled(undefined), true)
+})
 
 rmSync(root, { recursive: true, force: true })
 check.report('regression')
