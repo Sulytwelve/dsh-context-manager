@@ -1,0 +1,46 @@
+# Memory system for DeepSeek Harness.
+# Three independently switchable rows, in cost order:
+#   memory-core    hot path, no model calls
+#   memory-distill turn-end checkpoint + optional bounded model distillation
+#   memory-probe   background revalidation, no model calls
+- insert:
+    - id: memory-core
+      name: '@sulytwelve/dsh-memory-astra62'
+      config:
+        enabled: true
+        recall:
+          enabled: true
+          minRelevance: 2.5
+          tokenBudget: 220
+          limit: 3
+          maxPackets: 6
+          maxSessionTokens: 1400
+          subagentMaxPackets: 2
+          includeSubagents: true
+          probeOnRecall: true
+          probeTtlMs: 86400000
+          resumeMaxAgeMs: 604800000
+    - id: memory-distill
+      name: '@sulytwelve/dsh-memory-astra62/distill'
+      config:
+        enabled: true
+        checkpoint: true
+        includeSubagents: true
+        llm:
+          enabled: true
+          threshold: 4
+          deepThreshold: 6
+          maxCallsPerSession: 2
+          maxCallsPerDay: 12
+          maxTokens: 700
+          deepMaxTokens: 1400
+          minIntervalMs: 120000
+          maxCandidates: 2
+    - id: memory-probe
+      name: '@sulytwelve/dsh-memory-astra62/probe'
+      config:
+        enabled: true
+        intervalMs: 900000
+        initialDelayMs: 8000
+        maxPerSweep: 40
+        graceMs: 600000

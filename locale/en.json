@@ -1,0 +1,12 @@
+{
+  "meta": {
+    "title": "Cross-session memory",
+    "description": "Durable, scoped memory for coding sessions: just-in-time recall before a decision, verified task checkpoints, guarded probes that retire stale records, and optional bounded distillation at turn end. Three rows can be switched off independently so the memory system itself never becomes the bottleneck.",
+    "detail": "docs/DETAIL.md"
+  },
+  "rows": {
+    "core": "Memory core (recall, store, checkpoints)",
+    "distill": "Memory distillation (turn-end capture)",
+    "probe": "Memory probes (background revalidation)"
+  }
+}

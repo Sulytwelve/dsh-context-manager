@@ -1,0 +1,171 @@
+# Measurements
+
+Paired trials of the memory system on one Windows machine with the Desktop
+profile (`deepseek-v4-flash`, same route in every run). Numbers come from the
+durable session log, not from the plugin's own hopes: each run's
+`assistant/message.usage` totals are read back with `bench/analyze.mjs`, and the
+treatment runs were cross-checked against `memory{op:"report"}` — the two agreed
+token-for-token.
+
+## Method
+
+- **Fixture** (`node bench/setup.mjs`): a 14-file repository with one convention
+  buried in `docs/06-testing.md`, a decoy `npm test` script that only runs the
+  unit subset, and a failing `test/offset.test.mjs` whose contract is documented
+  in `docs/offset-contract.md`.
+- **Fresh session per run**, identical prompt, same working directory. A run is
+  a subagent session (`origin: subagent`), which is a real Session with its own
+  log, model calls, and tool calls.
+- **Conditions**:
+  - *off* — `memory-core` disabled (the other two rows go `pending`, so the
+    whole system is inert: no tool, no listener, no model call).
+  - *on* — all three rows active with the shipped defaults.
+- **Metrics**:
+  - *model calls* = `assistant/message` events = steps.
+  - *tool calls* = `tool/call` events.
+  - *input* = sum of `usage.inputTokens` (uncached prompt tokens);
+    *cached* = `usage.cacheReadTokens`; *output* = `usage.outputTokens`.
+  - *wall* = first → last event in the session log (task latency proxy; it
+    excludes the orchestrator).
+  - *success* = a deterministic check (`node test/offset.test.mjs` exit 0, or an
+    exact answer match).
+
+## Task 1 — one buried convention, single turn
+
+Prompt (identical in every run): *"What is the exact command that runs the full
+test suite? What environment variable enables the slow fixtures?"*
+
+| run | condition | model calls | tool calls | input | cached | output | wall | recall msgs | correct |
+|---|---|---|---|---|---|---|---|---|---|
+| B1 | off | 6 | 8 | 3,026 | 72,320 | 1,334 | 13.6 s | 0 | yes |
+| B2 | off | 7 | 8 | 2,936 | 86,400 | 861 | 9.6 s | 0 | yes |
+| T1 | on | 5 | 7 | 3,172 | 63,744 | 1,541 | 12.0 s | 1 (147 tok) | yes |
+| W1 | on (teach: discover + write) | 6 | 8 | 3,304 | 78,080 | 1,805 | 13.5 s | 0 | yes |
+
+Total token volume (input + cached + output): baseline mean **83,439** → T1
+**68,457** (−18%). Model calls 6.5 → 5 (−23%).
+
+But the interesting part is *why* it is not a bigger win: T1 received the answer
+in its recall packet and **verified it anyway** — it re-read `docs/06-testing.md`
+and re-ran the greps. Recall changed what the agent knew, not how much it chose
+to check. On this task the memory was worth about one model call, not the whole
+exploration.
+
+W1 is the one-time teaching cost: discovery, then an explicit `memory write`
+with a probe. It produced the record T1 read 40 s later, in a different session.
+
+## Task 2 — cross-session continuation
+
+Prompt (identical): *"Make the failing offset test pass. Do not modify
+`test/offset.test.mjs`."* Before each run the fixture was reset byte-for-byte;
+after each run the test was executed to score it.
+
+A prior session had diagnosed the root cause and written a `pitfall` record plus
+a task checkpoint (`milestone`, `next_action`, `acceptance`). No fix existed.
+
+| run | condition | model calls | tool calls | input | cached | output | wall | recall msgs | success |
+|---|---|---|---|---|---|---|---|---|---|
+| B3 | off | 10 | 12 | 5,979 | 128,384 | 1,437 | 16.3 s | 0 | pass |
+| T2 | on, *before retrieval calibration* | 10 | 11 | 4,385 | 140,672 | 2,480 | 21.6 s | 1 (167 tok, **0 records**) | pass |
+| T2b | on, calibrated | 8 | 11 | 3,121 | 109,440 | 1,731 | 14.7 s | 1 (188 tok, 1 record + resume) | pass |
+
+T2b vs B3: **−20% model calls, −16% total tokens, −10% wall**, same outcome.
+
+T2 is in the table on purpose. Before the scoring fix the correct record scored
+1.87 against a 2.5 threshold, so nothing was recalled, the packet carried only a
+stale resume line, and the run cost *more* than the baseline. Retrieval
+calibration mattered more than any other part of the system.
+
+## Conditional execution — the packet has to earn its place
+
+A trivial prompt (`"Compute 17 * 23"`) in the fixture directory, which has a
+task checkpoint for a completely different task:
+
+| run | resume gate | model calls | input | cached | output | wall | recall msgs |
+|---|---|---|---|---|---|---|---|
+| n1 | none (checkpoint always injected) | 1 | 1,754 | 10,752 | 149 | 1.9 s | 1 (95 tok) |
+| n2 | overlap required | 1 | 1,016 | 11,392 | 276 | 2.1 s | 0 |
+
+The packet is gone. Total volume is a wash at this size because prompt-cache
+accounting dominates a 100-token difference; the point is that an unrelated task
+no longer pays for memory at all.
+
+## Probe lifecycle — stale records leave the ranking (no model calls)
+
+Manual sequence against the record whose probe is `file-contains
+scripts/test.mjs "--suite="`:
+
+1. `memory{op:"probe"}` with the file present → `holds: contains --suite=`.
+2. Delete `scripts/test.mjs`, `memory{op:"probe"}` → `failed: missing scripts/test.mjs`;
+   the record becomes `stale`.
+3. `memory{op:"recall", query:"…full test suite…"}` → the record is **absent**.
+4. Restore the file, `memory{op:"probe"}` → `holds`; status returns to `active`.
+5. The same recall returns it again.
+
+Zero model calls, three tool calls, and the invalidation needed no schema of the
+world beyond the check the recorder declared.
+
+## Rollback — one row is enough
+
+With `memory-core` disabled (`plugin_manager set_plugin include:memory-core
+enabled=false`), a fresh session's first `request/header` lists 36 tools and
+**no `memory` tool**, and the session log has zero `memory-recall` messages.
+`memory-distill` and `memory-probe` report `pending (waiting for service:
+memoryStore)` — they cannot run alone. Re-enabling restores the tool and the
+existing records; stored data lives under `$DSH_HOME/storages/agent_memory/`.
+
+## Cost accounting
+
+| item | cost |
+|---|---|
+| `memory` tool schema, every request | 1,935 chars ≈ **538 tokens** (down from 2,897 chars ≈ 805 after trimming) |
+| one recall packet | **95–188 tokens** (default budget 220) |
+| recall pass, first step of a turn | **0.5–2 ms**, no model call, no I/O |
+| probe sweep | ≤ 40 `stat`/substring checks per 15 min, no model call |
+| distillation | 1 call per qualifying turn, ~1.0–1.6 k tokens; **7 calls / 9,905 tokens** across the 8 sessions that produced ledger rows before the "substantial turn" gate was added |
+
+The first version distilled on almost every turn, including two-step sessions
+that only saved a checkpoint. Requiring a turn score of 4 **and** at least three
+tool calls (or an explicit durable-intent phrase) cut that to zero on trivial
+turns. Distillation is off by `config.llm.enabled: false` if you want the system
+to make no model calls at all.
+
+## What the trials caught
+
+The benchmark was worth running for the defects it exposed, not just the
+numbers:
+
+1. **`invalid unit name 'agentMemory'`** — storage unit names must match
+   `/^[a-z][a-z0-9_]*$/`; the very first install failed until the domain was
+   renamed `agent_memory`.
+2. **Per-record keys must be path-safe** — keying `tasks` by an absolute
+   Windows path made every checkpoint write fail (the agent in the loop reported
+   the exact error). Keys are now `sha256(cwd)` with the readable path in the
+   record.
+3. **A turn-end heuristic overwrote a curated checkpoint**, replacing the next
+   action with "continue from the last verified step" and the milestone with the
+   raw prompt. A checkpoint written through the tool now wins for that session,
+   and a fresh checkpoint with a next action is left alone.
+4. **Distillation used the session header's cwd**, which is the *parent's*
+   directory for a subagent whose `cwd` came from a durable change. Distilled
+   records were scoped to the wrong project.
+5. **Retrieval scored the right record below threshold** — length-normalized
+   cosine punished long triggers and claims. Scoring is now trigger-coverage
+   based with a saturating trigger term.
+6. **An exact restated claim created duplicates** — an explicit write and a
+   later distillation of the same lesson now merge, and a lower-confidence
+   restatement cannot overwrite a verified claim.
+
+## Caveats
+
+- Task 2 has one run per cell, Task 1 has two baseline runs and one treatment
+  run. The deltas are large enough to be visible, not large enough for
+  confidence intervals.
+- The fixture is small; token totals are dominated by a handful of file reads.
+- Prompt-cache behaviour varies between runs, so `input` and `cached` must be
+  read together. Comparing only `inputTokens` overstates savings.
+- The model is not seeded; a different sample could change the step counts.
+- Distillation quality was measured by *records written*, not by downstream
+  outcomes. A stale or wrong distilled record costs recall tokens until a probe
+  or a human retires it.
+- All runs are on one machine, one DSH version (`0.2.2-rc.3`), one provider.
