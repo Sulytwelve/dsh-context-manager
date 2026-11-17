@@ -110,6 +110,43 @@ dsh plugin --profile <profile> add @sulytwelve/dsh-context-manager
 - `memory{op:"status"}` prints counters; after a turn ends,
   `memory{op:"resume"}` prints the checkpoint for the working directory.
 
+## Where things live
+
+The plugin is never installed into the DSH application directory. It is installed
+into a **profile**, and its data lives under **`$DSH_HOME`** — so the
+application's own install location (which the Desktop installer lets you choose)
+does not affect it.
+
+| What | Windows | macOS / Linux |
+|---|---|---|
+| DSH home (profiles + data root) | `%USERPROFILE%\.dsh` | `~/.dsh` |
+| Plugin in a profile | `%USERPROFILE%\.dsh\profiles\<profile>\node_modules\@sulytwelve\dsh-context-manager` | `~/.dsh/profiles/<profile>/node_modules/@sulytwelve/dsh-context-manager` |
+| Profile dependency and patch layer | `…\profiles\<profile>\package.json`, `cordis.patch.yml` | same layout |
+| Memory records (this plugin) | `%USERPROFILE%\.dsh\storages\agent_memory\` | `~/.dsh/storages/agent_memory/` |
+| Desktop settings file | `%APPDATA%\@deepseek-ai\dsh-desktop\desktop\settings.json` | `~/Library/Application Support/@deepseek-ai/dsh-desktop/desktop/settings.json` |
+| Desktop app install | `%LOCALAPPDATA%\Programs\DeepSeek Harness` by default; the installer accepts any directory | `/Applications/DeepSeek Harness.app` |
+| CLI / `npx` | no fixed install directory: it is a global npm package, and its launcher is often linked into `~/.local/bin` | same |
+
+Read the actual paths from a running profile instead of assuming them — every
+shell the profile launches carries them:
+
+```powershell
+$env:DSH_HOME          # profiles + storages root
+$env:DSH_PROFILE       # profile name, e.g. desktop
+$env:DSH_PROFILE_DIR   # …\.dsh\profiles\<profile>
+$env:DSH_INSTALL_DIR   # CLI package dir; in the Desktop build this points inside app.asar
+```
+
+Three consequences worth knowing:
+
+- **Profiles are separate installs.** Enabling the bundle in one profile does not
+  enable it in another; the records under `$DSH_HOME/storages/agent_memory/` are
+  shared by all of them.
+- **A custom Desktop install path moves nothing else.** Only `DSH_INSTALL_DIR`
+  changes; profile, data, and settings stay in their own directories.
+- **Uninstalling the Desktop app leaves `$DSH_HOME` intact** — the records survive,
+  and an uninstall does not delete them.
+
 ## What it stores
 
 One `agent_memory` storage domain, `per-record` layout, under
@@ -277,11 +314,24 @@ BSD-2-Clause. Copyright (c) 2026, Sulytwelve.
 
 ## 中文快速开始
 
-**DSH 上下文管理器**：为 DeepSeek Harness 提供上下文管理——按需召回相关项目知识、复核知识背后的证据、恢复跨会话任务。展示名已改为「DSH 上下文管理器」，但**包名、三行 row id、`memory` 工具名和 `agent_memory` 存储域保持不变**，已有安装、配置和数据可以继续使用；下文技术描述里指“记忆记录/存储/召回机制”时仍用 memory。
+**DSH 上下文管理器**：为 DeepSeek Harness 提供上下文管理——按需召回相关项目知识、复核知识背后的证据、恢复跨会话任务。展示名、GitHub 仓库、npm 包名现在统一为 `DSH Context Manager` / `@sulytwelve/dsh-context-manager`；**三行 row id（`memory-core`/`memory-distill`/`memory-probe`）、`memory` 工具名和 `agent_memory` 存储域保持不变**，已有记录和配置继续可用。下文技术描述里指“记忆记录/存储/召回机制”时仍用 memory。
 
 1. 对正在运行的 agent 说：**安装 `https://github.com/Sulytwelve/dsh-context-manager` 这个插件包并启用**。
    agent 会执行 `plugin_manager install_bundle`，三行插件随即出现在「插件」页。
 2. 新开会话，模型即拥有 `memory` 工具。
+
+**安装位置**（插件装在 profile 里，不在程序安装目录）：
+
+| 内容 | Windows | macOS / Linux |
+|---|---|---|
+| DSH 数据根（profile + 数据） | `%USERPROFILE%\.dsh` | `~/.dsh` |
+| 本插件在某个 profile 中 | `%USERPROFILE%\.dsh\profiles\<profile>\node_modules\@sulytwelve\dsh-context-manager` | `~/.dsh/profiles/<profile>/node_modules/@sulytwelve/dsh-context-manager` |
+| 记忆记录 | `%USERPROFILE%\.dsh\storages\agent_memory\` | `~/.dsh/storages/agent_memory/` |
+| 桌面版设置文件 | `%APPDATA%\@deepseek-ai\dsh-desktop\desktop\settings.json` | `~/Library/Application Support/@deepseek-ai/dsh-desktop/desktop/settings.json` |
+| 桌面版程序安装目录 | 默认 `%LOCALAPPDATA%\Programs\DeepSeek Harness`，安装时可自选 | `/Applications/DeepSeek Harness.app` |
+| CLI / `npx` | 无固定安装目录（全局 npm 包，启动器常链接到 `~/.local/bin`） | 同上 |
+
+实际路径以运行中的 profile 为准：`$env:DSH_HOME`、`$env:DSH_PROFILE`、`$env:DSH_PROFILE_DIR`、`$env:DSH_INSTALL_DIR`（桌面版指向 `app.asar` 内部）。注意：**不同 profile 是各自独立的安装**，但 `storages/agent_memory/` 是共享的；换桌面版安装目录不影响插件与数据；卸载桌面版不会删除 `$DSH_HOME`。
 
 - 想让记忆更积极：把 `memory-core` 的 `recall.minRelevance` 调低（例如 2.0）。
 - 想完全关掉后台模型调用：把 `memory-distill` 的 `llm.enabled` 设为 `false`。
