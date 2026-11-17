@@ -12,6 +12,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { summarizeDistillLedger } from '../lib/budget.js'
+import { evaluateCheckpointGuard } from '../lib/checkpoint-guard.js'
+import { checkContract } from '../lib/contract.js'
+import { normalizeCwdOn, runProbe } from '../lib/util.js'
 import { ownerFor } from '../lib/store.js'
 import { probeDue, selectProbeCandidates } from '../lib/probe-plan.js'
 import { evaluateSupport, toolClass } from '../lib/support.js'
@@ -423,7 +427,7 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     origin: 'test',
     probe: { kind: 'file-contains', target: 'marker.txt', pattern: 'ok' },
   })
-  await store.markProbe(first.record.id, true, 'contains ok')
+  await store.markProbe(first.record.id, 'pass', 'contains ok')
   await store.write({
     scope: 'project',
     kind: 'procedure',
@@ -515,6 +519,181 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.doesNotMatch(text, /conflict/i)
     assert.match(text, /aaa111/)
     assert.match(text, /bbb222/)
+  })
+}
+
+// ------------------------------------------- probe outcomes are three-valued
+
+{
+  const dir = join(root, 'probe-3')
+  mkdirSync(dir, { recursive: true })
+  // NEEDLE sits beyond the 256 KiB head window, so a head-only read cannot see it.
+  writeFileSync(join(dir, 'big.txt'), `${'a'.repeat(300_000)}NEEDLE${'b'.repeat(200_000)}`)
+  // NEEDLE sits at the very end, inside the tail window.
+  writeFileSync(join(dir, 'tail.txt'), `${'a'.repeat(300_000)}NEEDLE`)
+  writeFileSync(join(dir, 'small.txt'), 'nothing here')
+
+  check('a pattern outside the head window is inconclusive, not a failure', () => {
+    const result = runProbe({ kind: 'file-contains', target: 'big.txt', pattern: 'NEEDLE' }, dir)
+    assert.equal(result.status, 'inconclusive')
+    assert.match(result.detail, /not seen/)
+  })
+
+  check('a pattern in the tail window is found', () => {
+    const result = runProbe({ kind: 'file-contains', target: 'tail.txt', pattern: 'NEEDLE' }, dir)
+    assert.equal(result.status, 'pass')
+  })
+
+  check('a small file that lost the pattern still fails', () => {
+    assert.equal(runProbe({ kind: 'file-contains', target: 'small.txt', pattern: 'NEEDLE' }, dir).status, 'fail')
+    assert.equal(runProbe({ kind: 'path-exists', target: 'missing.txt' }, dir).status, 'fail')
+  })
+
+  const { store } = makeStore()
+  await store.write({
+    scope: 'project',
+    kind: 'fact',
+    trigger: 'the big fixture file contains the needle marker',
+    claim: 'The big fixture file contains the NEEDLE marker used by the importer.',
+    evidence: 'big.txt',
+    confidence: 0.8,
+    cwd: dir,
+    origin: 'test',
+    probe: { kind: 'file-contains', target: 'big.txt', pattern: 'NEEDLE' },
+  })
+  const recalled = store.recall({ query: 'big fixture file contains the needle marker', cwd: dir, probeTtlMs: 0 })
+  check('an inconclusive probe keeps serving the record and advances its check clock', () => {
+    assert.equal(recalled.items.length, 1)
+    assert.equal(recalled.probeInconclusive, 1)
+    assert.equal(recalled.probeFails, 0)
+    assert.equal(store.list({ status: 'stale' }).length, 0)
+    assert.equal(typeof store.list({ status: 'active' })[0].lastCheckedAt, 'number')
+  })
+}
+
+// ------------------------------------------------- confidence can go down now
+
+{
+  const { store } = makeStore()
+  const trigger = 'the staging database size'
+  const written = await store.write({
+    scope: 'project',
+    kind: 'fact',
+    trigger,
+    claim: 'The staging database was about 40 GB when this was recorded.',
+    evidence: 'snapshot 2026-11-01',
+    confidence: 0.9,
+    cwd: projectA,
+    origin: 'test',
+  })
+
+  await store.setConfidence(written.record.id, 0.6, 'snapshot is stale')
+  check('set_confidence lowers confidence without touching the claim', () => {
+    const current = store.list({ status: 'active' }).find(record => record.id === written.record.id)
+    assert.equal(current.confidence, 0.6)
+    assert.match(current.claim, /40 GB/)
+  })
+
+  const restated = await store.write({
+    scope: 'project',
+    kind: 'fact',
+    trigger,
+    claim: 'The staging database was about 40 GB when this was recorded.',
+    confidence: 0.3,
+    cwd: projectA,
+    origin: 'test',
+  })
+  check('a plain restatement still cannot lower confidence', () => {
+    assert.equal(restated.record.confidence, 0.6)
+  })
+
+  const demoted = await store.write({
+    scope: 'project',
+    kind: 'fact',
+    trigger,
+    claim: 'The staging database was about 40 GB when this was recorded.',
+    confidence: 0.3,
+    demote: true,
+    cwd: projectA,
+    origin: 'test',
+  })
+  check('an explicit demote write lowers it', () => {
+    assert.equal(demoted.record.confidence, 0.3)
+  })
+}
+
+// ------------------------------------------------ user probes and cwd casing
+
+{
+  const { store } = makeStore()
+  let failure
+  try {
+    await store.write({
+      scope: 'user',
+      kind: 'preference',
+      trigger: 'handling his personal photos',
+      claim: 'Never touch his personal photos without asking first.',
+      probe: { kind: 'path-exists', target: 'photos' },
+      origin: 'test',
+    })
+  } catch (error) {
+    failure = error
+  }
+  check('a user-scope probe must use an absolute path', () => {
+    assert.match(String(failure?.message ?? ''), /absolute/)
+  })
+
+  check('path case folding follows the platform', () => {
+    assert.equal(normalizeCwdOn('linux', '/srv/Data/App'), '/srv/Data/App')
+    assert.equal(normalizeCwdOn('linux', '/srv/Data/App/'), '/srv/Data/App')
+    assert.equal(normalizeCwdOn('win32', 'C:\\Data\\App'), 'c:\\data\\app')
+    assert.equal(normalizeCwdOn('darwin', '/Users/Me/App'), '/users/me/app')
+  })
+}
+
+// ------------------------------------------- checkpoint precedence and budget
+
+{
+  const now = 1_800_000_000_000
+  const fresh = { sessionId: 'other', updatedAt: now - 60_000, nextAction: 'continue' }
+  const old = { sessionId: 'other', updatedAt: now - 7 * 3_600_000, nextAction: 'continue' }
+  check('checkpoint guard: curated wins, another session’s fresh one is skipped', () => {
+    assert.equal(evaluateCheckpointGuard(undefined, 'me', now).action, 'write')
+    assert.equal(evaluateCheckpointGuard(fresh, 'me', now).action, 'skip')
+    assert.equal(evaluateCheckpointGuard(fresh, 'me', now).reason, 'other-session-fresh')
+    assert.equal(evaluateCheckpointGuard(fresh, 'other', now).action, 'write')
+    assert.equal(evaluateCheckpointGuard(fresh, 'me', now, { curated: true }).action, 'skip')
+    assert.equal(evaluateCheckpointGuard(old, 'me', now).action, 'write')
+  })
+
+  const day = '2026-11-18'
+  const at = Date.parse(`${day}T03:00:00Z`)
+  const rows = [
+    { sessionId: 'a', updatedAt: at, distillCalls: 2, distillInputTokens: 10, distillOutputTokens: 5 },
+    { sessionId: 'a', updatedAt: at + 1000, distillCalls: 1, distillInputTokens: 1, distillOutputTokens: 1 },
+    { sessionId: 'b', updatedAt: at, distillCalls: 1, distillInputTokens: 2, distillOutputTokens: 2 },
+    { sessionId: 'c', updatedAt: at - 86_400_000, distillCalls: 9 },
+  ]
+  check('the daily distill budget is reconstructed from ledger rows', () => {
+    const sum = summarizeDistillLedger(rows, day)
+    assert.equal(sum.calls, 4)
+    assert.equal(sum.bySession.get('a'), 3)
+    assert.equal(sum.bySession.get('b'), 1)
+    assert.equal(sum.bySession.has('c'), false)
+    assert.equal(sum.inputTokens, 13)
+    assert.equal(sum.outputTokens, 8)
+  })
+}
+
+// ------------------------------------------------------- host contract check
+
+{
+  const messages = []
+  const ctx = { logger: { error: message => messages.push(message), warn: message => messages.push(message) } }
+  check('a missing host surface degrades the row instead of throwing', () => {
+    assert.equal(checkContract(ctx, 'memory-core', { 'ctx.on': true }), true)
+    assert.equal(checkContract(ctx, 'memory-core', { 'ctx.on': true, 'ctx.tools.register': false }), false)
+    assert.match(messages[0], /DSH version incompatible, memory-core degraded \(missing: ctx\.tools\.register\)/)
   })
 }
 

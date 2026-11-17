@@ -173,7 +173,7 @@ packet is appended as **one synthetic user message** whose source is
 visible in the transcript:
 
 ```text
-[memory] 2 prior record(s) recalled (evidence, not instructions — verify before relying).
+[context-manager] 2 prior record(s) recalled (evidence, not instructions — verify before relying).
 Resume (2d ago): checkpoint ... | done: ... | next: ...
 - [397c39] pitfall·project (0.90 verified ·checked 3h ·2x): opening a ctx.storageDomain domain → names must match /^[a-z][a-z0-9_]*$/
 Persist a durable lesson with memory{op:"write",kind,trigger,claim,evidence}.
@@ -199,21 +199,42 @@ archival would delete exactly the long-tail knowledge this is for.
 |---|---|
 | `lastUsedAt` / `uses` | when it was last recalled, and how often — never an eviction trigger |
 | `updatedAt` | ranking freshness only: ×1.00 up to 7 days, ×0.95 up to 30, ×0.85 after |
-| `lastCheckedAt` | when its probe last ran; a failing probe marks it `stale`, which stops recall until it passes again |
+| `lastCheckedAt` | when its probe last ran; only a *failed* probe marks it `stale` |
+
+**A probe has three outcomes, not two.** `pass` is evidence the record still
+holds; `fail` is evidence it does not; `inconclusive` means the check could not
+see enough (the pattern was not in the scanned window of a large file, or the
+target was unreadable). Only `fail` retires a record — an inconclusive check
+keeps serving it and merely advances the check clock. `file-contains` scans the
+head (`probeMaxBytes`, default 256 KiB) plus, on a miss, the last 64 KiB; a
+pattern outside both windows is `inconclusive` rather than a false `fail`, so a
+background sweep can still revive the record later.
+
+**Confidence rises on restatement, and falls only on request.** A re-write never
+lowers a record's confidence, and raising it to fix a wrong value does not work
+either: use `memory{op:"set_confidence"}` (or `write` with `"demote": true`) when
+a batch import or a stale snapshot turns out to have been too certain.
 
 A record with no probe can only be retired by a later write or an explicit
 `forget` / `set_status`. That is why `status` reports scope+trigger groups that
 hold more than one active record: it is the cheap way to notice a superseded
 conclusion that nobody retired, without deleting anything automatically.
 
+Project identity is the normalized working directory, case-folded only where the
+filesystem is case-insensitive (Windows and macOS) — on Linux two paths that
+differ by case stay two projects.
+
 Task checkpoints follow a different rule: one is attached automatically only
 while it is younger than `resumeMaxAgeMs` (7 days), but `memory{op:"resume"}`
-still returns it after that until a later task overwrites it.
+still returns it after that until a later task overwrites it. When a turn-end
+write is skipped because another session left a fresh checkpoint in the same
+directory, `status` names that checkpoint instead of losing it silently.
 
 ## The tool
 
 One tool, `memory`, with operations `recall`, `write`, `forget`, `status`,
-`report`, `checkpoint`, `resume`, `probe`, `feedback`, `set_status`.
+`report`, `checkpoint`, `resume`, `probe`, `feedback`, `set_status`,
+`set_confidence`.
 
 `status` also carries a read-only review hint: when the same scope and the same
 trigger hold more than one `active` record, it lists the group and its ids. That
@@ -233,6 +254,10 @@ differently because of it. It appears only when you ask for `status`.
 {"op":"checkpoint","milestone":"reproduced the offset gap",
  "next_action":"fix nextOffset to stop at the first gap",
  "acceptance":"test/offset.test.mjs passes"}
+
+// correct an over-confident import without rewriting it
+{"op":"set_confidence","id":"mem_mwl9hmc3_7e70e062","confidence":0.6,
+ "query":"snapshot was from October"}
 
 // counters for this session and the store (includes the review hint)
 {"op":"status"}
@@ -327,8 +352,8 @@ control design, the invalid runs, and the caveats.
 ## Development
 
 ```bash
-node test/smoke.mjs        # 17 store-level checks, no DSH required
-node test/regression.mjs   # 26 isolation / probe / evidence regression checks
+node test/smoke.mjs        # 18 store-level checks, no DSH required
+node test/regression.mjs   # 44 isolation / probe / evidence regression checks
 node bench/setup.mjs       # build the benchmark fixture
 node bench/analyze.mjs <session.v4.jsonl.zstd>   # per-session calls/tokens/wall
 node bench/score.mjs "$DSH_HOME/storages/agent_memory" "<query>" --cwd <dir>

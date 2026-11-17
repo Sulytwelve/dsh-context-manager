@@ -1,6 +1,6 @@
 {
   "name": "@sulytwelve/dsh-context-manager",
-  "version": "1.1.9",
+  "version": "1.2.0",
   "description": "DSH Context Manager: context management for DeepSeek Harness — on-demand recall of project knowledge, evidence revalidation, and cross-session task resumption, split into independently toggleable perf tiers.",
   "keywords": [
     "dsh",
@@ -40,6 +40,7 @@
     "cordis.patch.yml",
     "locale",
     "docs",
+    "test",
     "icon.svg",
     "icons"
   ],

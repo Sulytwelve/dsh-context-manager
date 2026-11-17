@@ -8,6 +8,9 @@
  * user's next turn never waits for it.
  */
 
+import { summarizeDistillLedger } from './lib/budget.js'
+import { evaluateCheckpointGuard } from './lib/checkpoint-guard.js'
+import { checkContract } from './lib/contract.js'
 import { evaluateSupport, renderSupport } from './lib/support.js'
 import { clip, estimateTokens, nowMs, oneLine } from './lib/util.js'
 
@@ -376,11 +379,20 @@ async function distillWithModel(ctx, store, config, sample, level) {
 /** Write the deterministic checkpoint for the finished turn. */
 async function writeCheckpoint(store, sample) {
   if (sample.cwd === undefined) return
-  // A curated checkpoint wins: the model or the user stated the next action on
-  // purpose, and a turn-end heuristic must not replace it with a summary.
-  if (store.isCurated(sample.sessionId)) return
   const existing = store.getCheckpoint(sample.cwd)
-  if (existing !== undefined && existing.nextAction !== undefined && Date.now() - existing.updatedAt < 21_600_000) return
+  const guard = evaluateCheckpointGuard(existing, sample.sessionId, Date.now(), {
+    curated: store.isCurated(sample.sessionId),
+  })
+  if (guard.action === 'skip') {
+    // Do not lose state silently: another session's fresh checkpoint stays, and
+    // the skip is visible in the event ring (and in `status` of that session).
+    await store.event(
+      'checkpoint-skipped',
+      `${guard.reason} (existing session ${String(existing?.sessionId ?? '?').slice(0, 8)}, ${Math.round((guard.ageMs ?? 0) / 60000)}m old)`,
+      sample.sessionId,
+    )
+    return
+  }
 
   const lastError = sample.errors.slice(-1)[0]
   await store.checkpoint(sample.cwd, {
@@ -400,12 +412,32 @@ export async function apply(ctx, rawConfig) {
   const config = normalizeConfig(rawConfig)
   const store = ctx.get('memoryStore')
   if (store === undefined) {
-    ctx.logger?.warn?.('[memory] distill inactive: memoryStore missing')
+    ctx.logger?.warn?.('[context-manager] distill inactive: memoryStore missing')
     return
   }
   if (config.enabled === false) {
-    ctx.logger?.info?.('[memory] distill disabled by config')
+    ctx.logger?.info?.('[context-manager] distill disabled by config')
     return
+  }
+  const compatible = checkContract(ctx, 'memory-distill', {
+    'ctx.on': typeof ctx.on === 'function',
+    'ctx.effect': typeof ctx.effect === 'function',
+    'ctx.get': typeof ctx.get === 'function',
+  })
+  if (!compatible) return
+
+  // Recover today's spend from the ledger so a restart does not reset the cap.
+  const today = new Date().toISOString().slice(0, 10)
+  try {
+    const recovered = summarizeDistillLedger(store.ledgerRows(), today)
+    budgets.day = today
+    budgets.calls = recovered.calls
+    budgets.bySession = new Map(recovered.bySession)
+    if (recovered.calls > 0) {
+      store.log('info', `distill budget recovered from ledger: ${recovered.calls} call(s) today`)
+    }
+  } catch (error) {
+    store.log('debug', `distill budget recovery failed: ${String(error?.message ?? error)}`)
   }
 
   ctx.effect(() => () => {
@@ -467,5 +499,5 @@ export async function apply(ctx, rawConfig) {
     }
   })
 
-  ctx.logger?.info?.(`[memory] distill active (llm ${config.llm.enabled ? `on, threshold ${config.llm.threshold}` : 'off'})`)
+  ctx.logger?.info?.(`[context-manager] distill active (llm ${config.llm.enabled ? `on, threshold ${config.llm.threshold}` : 'off'})`)
 }

@@ -8,6 +8,7 @@
  * this row is the low-priority hygiene loop for records nobody has asked for.
  */
 
+import { checkContract } from './lib/contract.js'
 import { selectProbeCandidates } from './lib/probe-plan.js'
 import { nowMs, oneLine, runProbe } from './lib/util.js'
 
@@ -40,23 +41,29 @@ export function apply(ctx, rawConfig) {
   const config = normalizeConfig(rawConfig)
   const store = ctx.get('memoryStore')
   if (store === undefined) {
-    ctx.logger?.warn?.('[memory] probe inactive: memoryStore missing')
+    ctx.logger?.warn?.('[context-manager] probe inactive: memoryStore missing')
     return
   }
   if (config.enabled === false) {
-    ctx.logger?.info?.('[memory] probe disabled by config')
+    ctx.logger?.info?.('[context-manager] probe disabled by config')
     return
   }
+  const compatible = checkContract(ctx, 'memory-probe', {
+    'ctx.get': typeof ctx.get === 'function',
+    'ctx.effect': typeof ctx.effect === 'function',
+  })
+  if (!compatible) return
 
   let running = false
 
   async function sweep(reason) {
-    if (running) return { checked: 0, failed: 0, revived: 0, ms: 0 }
+    if (running) return { checked: 0, failed: 0, revived: 0, inconclusive: 0, ms: 0 }
     running = true
     const started = nowMs()
     let checked = 0
     let failed = 0
     let revived = 0
+    let inconclusive = 0
     try {
       const now = Date.now()
       // Least-recently-checked first, so a batch of healthy records cannot keep
@@ -77,26 +84,33 @@ export function apply(ctx, rawConfig) {
         }
         const result = runProbe(record.probe, record.cwd, config.maxBytes)
         checked += 1
-        if (!result.ok) {
+        if (result.status === 'fail') {
           failed += 1
           if (record.status !== 'stale') {
-            await store.markProbe(record.id, false, result.detail)
+            await store.markProbe(record.id, 'fail', result.detail)
             await store.event('probe-stale', `${record.id}: ${result.detail}`)
           }
+        } else if (result.status === 'inconclusive') {
+          // The check could not see the evidence (too large, unreadable, or
+          // outside the scanned window). Record the attempt, change nothing.
+          inconclusive += 1
+          await store.markProbe(record.id, 'inconclusive', result.detail)
         } else if (record.status === 'stale') {
           revived += 1
-          await store.markProbe(record.id, true, result.detail)
+          await store.markProbe(record.id, 'pass', result.detail)
           await store.event('probe-revived', `${record.id}: ${result.detail}`)
+        } else {
+          await store.markProbe(record.id, 'pass', result.detail)
         }
       }
-      const summary = { checked, failed, revived, ms: nowMs() - started }
+      const summary = { checked, failed, revived, inconclusive, ms: nowMs() - started }
       if (checked > 0) {
-        store.log('info', `probe sweep (${reason}): ${checked} checked, ${failed} failed, ${revived} revived in ${summary.ms.toFixed(0)}ms`)
+        store.log('info', `probe sweep (${reason}): ${checked} checked, ${failed} failed, ${inconclusive} inconclusive, ${revived} revived in ${summary.ms.toFixed(0)}ms`)
       }
       return summary
     } catch (error) {
       store.log('warn', `probe sweep failed: ${String(error?.message ?? error)}`)
-      return { checked, failed, revived, ms: nowMs() - started }
+      return { checked, failed, revived, inconclusive, ms: nowMs() - started }
     } finally {
       running = false
     }
@@ -120,5 +134,5 @@ export function apply(ctx, rawConfig) {
     })
   }
 
-  ctx.logger?.info?.(`[memory] probe active every ${Math.round(config.intervalMs / 1000)}s`)
+  ctx.logger?.info?.(`[context-manager] probe active every ${Math.round(config.intervalMs / 1000)}s`)
 }

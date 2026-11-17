@@ -75,6 +75,13 @@ packed into a token budget (220 tokens by default) and appended as one synthetic
 `recall`-form user message, so the packet is durable, attributable, and visible
 in the transcript. A verbose record is truncated to fit rather than dropped.
 
+A probe is three-valued: `pass`, `fail`, or `inconclusive`. Only `fail` retires
+a record. `inconclusive` covers the cases where the check could not see the
+evidence — a pattern outside the scanned window of a large file, or an
+unreadable target — and it keeps the record in service. `file-contains` reads
+`probeMaxBytes` from the head and, on a miss, the last 64 KiB; a file larger
+than both windows that does not match is inconclusive rather than falsely stale.
+
 Nothing is injected when nothing scores above `minRelevance`, when the
 per-session packet cap is reached, or when the same record was already injected
 in this session. The task checkpoint is injected only when the prompt actually
@@ -123,20 +130,43 @@ One tool, `memory`, with operations:
 
 - `write` — persist one lesson: `kind`, `trigger`, `claim`, optional `evidence`,
   `confidence`, `tags`, and an optional `probe` (`path-exists` or
-  `file-contents`).
+  `file-contains`). `demote: true` lets that write lower an existing confidence.
 - `recall` — explicit search over the store.
 - `checkpoint` / `resume` — save and read the task state for this directory.
 - `probe` / `feedback` / `forget` / `set_status` — maintain a record.
-- `status` — counters for this session and the store.
+- `set_confidence` — lower (or raise) one record's confidence without rewriting
+  its claim, for an over-confident import or a stale snapshot.
+- `status` — counters for this session and the store, the review hint, and a
+  checkpoint left by another session.
+- `report` — the per-session token/call/latency ledger.
+
+## Tuning retrieval
+
+The scoring numbers are empirical. Two small tools exist to calibrate them
+against a live store instead of guessing:
+
+```bash
+# every candidate's trigger/query coverage against the real records
+node bench/score.mjs "$DSH_HOME/storages/agent_memory" "<the prompt you care about>" --cwd <dir>
+
+# the exact packet that prompt would receive, and what it costs
+node bench/packet.mjs "$DSH_HOME/storages/agent_memory" "<prompt>" --cwd <dir>
+```
+
+Raise `recall.minRelevance` when the packet shows a weak match, lower it when a
+relevant record is missing. `bench/packet.mjs` also shows the injection token
+cost, which is what `recall.tokenBudget` bounds. The installed package ships
+`test/`, so `node test/smoke.mjs` and `node test/regression.mjs` can be run from
+the installed copy.
 
 ## Limitations
 
 - Retrieval is lexical, not semantic. A record whose vocabulary does not overlap
   the user's wording will not surface; write triggers in the words you would use
   to ask for it.
-- Recall is free of I/O only while no probe is due; a due probe reads its target
-  file, bounded by `probeMaxBytes`. Five probes per recall and 40 per sweep are
-  hard caps.
+- Recall is free of I/O only while no probe is due; a due probe reads up to
+  `probeMaxBytes` from the head plus 64 KiB from the tail. Five probes per recall
+  and 40 per sweep are hard caps.
 - A probe only expresses the checks the recorder declared. Records without a
   probe are never automatically invalidated.
 - Distillation is a single non-tool model call; it cannot read files. Its output
@@ -145,7 +175,10 @@ One tool, `memory`, with operations:
   command that ran stays `proposed`.
 - Self-reported confidence is not calibrated; a record written with
   `confidence: 0.9` by the model is trusted the same way as one written by hand.
+  `set_confidence` makes correcting that cheap, but nothing corrects it
+  automatically.
 - Measurement counters are per process until flushed at turn end; a hard crash
-  can lose the current turn's counters.
+  can lose the current turn's counters. The distillation budget is rebuilt from
+  the ledger at start, so a restart does not reset the daily cap.
 - Disabling `memory-core` leaves existing data on disk (re-enabling resumes it)
   and makes `memory-distill` and `memory-probe` inactive until it returns.
