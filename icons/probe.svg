@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Evidence probes">
+  <defs>
+    <linearGradient id="prb-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#122033"/>
+      <stop offset="1" stop-color="#0b1320"/>
+    </linearGradient>
+    <linearGradient id="prb-ink" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#5aa9ff"/>
+      <stop offset="1" stop-color="#7ee0c0"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#prb-bg)"/>
+  <rect x="2.75" y="2.75" width="58.5" height="58.5" rx="13.25" fill="none" stroke="#2b3f63" stroke-width="1.5"/>
+  <circle cx="30" cy="30" r="11" fill="none" stroke="url(#prb-ink)" stroke-width="3"/>
+  <path d="M38 38l8 8" stroke="url(#prb-ink)" stroke-width="3.2" stroke-linecap="round"/>
+  <path d="M25 30.5l3.3 3.4 6.4-7" fill="none" stroke="#7ee0c0" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

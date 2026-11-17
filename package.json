@@ -1,6 +1,6 @@
 {
   "name": "@sulytwelve/dsh-memory-astra62",
-  "version": "1.1.5",
+  "version": "1.1.6",
   "description": "DSH Context Manager: context management for DeepSeek Harness — on-demand recall of project knowledge, evidence revalidation, and cross-session task resumption, split into independently toggleable perf tiers.",
   "keywords": [
     "dsh",
@@ -25,6 +25,10 @@
     ".": "./index.js",
     "./distill": "./distill.js",
     "./probe": "./probe.js",
+    "./distill/locale/*.json": "./locale/distill/*.json",
+    "./probe/locale/*.json": "./locale/probe/*.json",
+    "./distill/icon": "./icons/distill.svg",
+    "./probe/icon": "./icons/probe.svg",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
@@ -34,9 +38,10 @@
     "probe.js",
     "lib",
     "cordis.patch.yml",
-    "locale/*.json",
+    "locale",
     "docs",
-    "icon.svg"
+    "icon.svg",
+    "icons"
   ],
   "scripts": {
     "test": "node test/smoke.mjs && node test/regression.mjs",

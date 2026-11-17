@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Context distillation",
+    "description": "Turns a finished turn into a durable task checkpoint, and optionally spends one bounded request to propose memory records."
+  }
+}

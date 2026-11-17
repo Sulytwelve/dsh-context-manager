@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Evidence probes",
+    "description": "Re-runs the checks that memory records declare, retires the ones that no longer hold, and revives them when they hold again."
+  }
+}
