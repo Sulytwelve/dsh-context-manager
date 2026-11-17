@@ -197,8 +197,21 @@ means the five-probe recall budget is binding, not that the checks failed.
 distillation calls and their tokens, and the session span. `memory{op:"status"}`
 reports the current session plus store-wide counts.
 
-`docs/MEASUREMENTS.md` records a paired before/after trial run against the
-deterministic fixture created by `node bench/setup.mjs`.
+Measured on a fixture rebuilt by `node bench/setup.mjs`:
+
+- **Cross-session continuation** (diagnose in one session, fix in the next):
+  −20% model calls, −16% token volume, −10% wall, same outcome.
+- **Recall versus no recall**, same fixture and prompt, tool schema present in
+  both: 36,346 and 23,859 total tokens over two GUI runs against 52,426 with
+  `recall.enabled: false`. Direction is consistent; magnitude is unsettled at
+  n=2 versus 1.
+- **One-shot factual question**: −18% volume and −23% calls, but the model still
+  verified the recalled fact — most of that saving is fewer calls, not less
+  checking.
+
+These are token-volume measurements, not billing: uncached input, cached input,
+and output are priced differently. `docs/MEASUREMENTS.md` has the raw tables, the
+control design, the invalid runs, and the caveats.
 
 ## Disable, rollback, uninstall
 
