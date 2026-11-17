@@ -4,11 +4,16 @@
 knowledge on demand, revalidates the evidence behind it, and restores a task that
 was left unfinished in another session.
 
-The package name is still `@sulytwelve/dsh-memory-astra62`: the product was
-renamed, the npm identity, row ids, the `memory` tool, and the `agent_memory`
-storage domain were not, so existing installs, configurations, and records keep
-working. The implementation vocabulary stays "memory" wherever it means a
-memory record, its storage, or the recall mechanism.
+The bundle, the npm package, and the GitHub repository are all named
+`@sulytwelve/dsh-context-manager` now. Two identifiers did **not** change, so
+existing records and configurations keep working: the `memory` tool, the
+`agent_memory` storage domain, and the three row ids (`memory-core`,
+`memory-distill`, `memory-probe`). The implementation vocabulary stays "memory"
+wherever it means a memory record, its storage, or the recall mechanism.
+
+Migrating an install of the old `@sulytwelve/dsh-memory-astra62` package:
+`remove_bundle` it, then `install_bundle` the new name — stored records live in
+the unchanged `agent_memory` domain, so nothing is lost.
 
 - **No embeddings, no vector database.** Retrieval scores the record's *trigger*
   — the situation it claims to apply to — against the current prompt using
@@ -35,7 +40,7 @@ memory record, its storage, or the recall mechanism.
 
 | Row id | Module | Model calls | Cost |
 |---|---|---|---|
-| `memory-core` | `@sulytwelve/dsh-memory-astra62` | none | One scoring pass per turn start; a few small file writes |
+| `memory-core` | `@sulytwelve/dsh-context-manager` | none | One scoring pass per turn start; a few small file writes |
 | `memory-distill` | `…/distill` | 0–2 per qualifying turn, **enabled by default** | One bounded background request, after the turn already closed |
 | `memory-probe` | `…/probe` | none | A periodic `stat` / substring check of at most 40 records |
 
@@ -53,7 +58,7 @@ same `plugin_manager` operation.
 ### From a local checkout (the path verified during development)
 
 ```text
-plugin_manager action=install_bundle target=D:\path\to\dsh-memory-astra62
+plugin_manager action=install_bundle target=D:\path\to\dsh-context-manager
 ```
 
 The manager links the directory, so edits are picked up on the next process
@@ -88,14 +93,14 @@ and install the local directory instead.
 ### From a published package
 
 ```text
-plugin_manager action=install_bundle target=@sulytwelve/dsh-memory-astra62
+plugin_manager action=install_bundle target=@sulytwelve/dsh-context-manager
 ```
 
 Equivalent CLI (installs the dependency; select the bundle in **Plugins** if the
 manager did not):
 
 ```bash
-dsh plugin --profile <profile> add @sulytwelve/dsh-memory-astra62
+dsh plugin --profile <profile> add @sulytwelve/dsh-context-manager
 ```
 
 ### Verify
@@ -231,7 +236,7 @@ control design, the invalid runs, and the caveats.
   background I/O. `memory-core` off ⇒ the other rows go inactive.
 - **Rollback:** disable all three rows; stored data stays under
   `$DSH_HOME/storages/agent_memory/` and comes back when you re-enable.
-- **Uninstall:** `plugin_manager action=remove_bundle target=@sulytwelve/dsh-memory-astra62`.
+- **Uninstall:** `plugin_manager action=remove_bundle target=@sulytwelve/dsh-context-manager`.
   Remove the storage directory too if you want the records gone.
 
 ## Requirements and limits

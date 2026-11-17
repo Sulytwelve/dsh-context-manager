@@ -5,11 +5,14 @@ curated set of **scoped, evidence-bearing memory records** plus one **task
 checkpoint per working directory**, recalls them just before a model decision,
 and retires them when a cheap probe shows they no longer hold.
 
-This is a product rename, not a re-architecture: the package
-(`@sulytwelve/dsh-memory-astra62`), the three row ids, the `memory` tool, and the
-`agent_memory` storage domain are unchanged, so existing installs,
-configurations, and records keep working. The word "memory" below still means a
-memory record, its storage, or the recall mechanism.
+This is a product rename, not a re-architecture: the bundle, npm package, and
+repository are now `@sulytwelve/dsh-context-manager`, while the three row ids,
+the `memory` tool, and the `agent_memory` storage domain are unchanged, so
+existing records and configurations keep working. The word "memory" below still
+means a memory record, its storage, or the recall mechanism.
+
+Migrating from the old package name: `remove_bundle` the old
+`@sulytwelve/dsh-memory-astra62`, then install the new one.
 
 ## Why it is split into three rows
 

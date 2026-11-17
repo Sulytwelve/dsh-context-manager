@@ -5,7 +5,7 @@
 #   memory-probe   background revalidation, no model calls
 - insert:
     - id: memory-core
-      name: '@sulytwelve/dsh-memory-astra62'
+      name: '@sulytwelve/dsh-context-manager'
       config:
         enabled: true
         recall:
@@ -21,7 +21,7 @@
           probeTtlMs: 86400000
           resumeMaxAgeMs: 604800000
     - id: memory-distill
-      name: '@sulytwelve/dsh-memory-astra62/distill'
+      name: '@sulytwelve/dsh-context-manager/distill'
       config:
         enabled: true
         checkpoint: true
@@ -37,7 +37,7 @@
           minIntervalMs: 120000
           maxCandidates: 2
     - id: memory-probe
-      name: '@sulytwelve/dsh-memory-astra62/probe'
+      name: '@sulytwelve/dsh-context-manager/probe'
       config:
         enabled: true
         intervalMs: 900000

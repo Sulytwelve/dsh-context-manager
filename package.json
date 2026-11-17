@@ -1,6 +1,6 @@
 {
-  "name": "@sulytwelve/dsh-memory-astra62",
-  "version": "1.1.6",
+  "name": "@sulytwelve/dsh-context-manager",
+  "version": "1.1.7",
   "description": "DSH Context Manager: context management for DeepSeek Harness — on-demand recall of project knowledge, evidence revalidation, and cross-session task resumption, split into independently toggleable perf tiers.",
   "keywords": [
     "dsh",
