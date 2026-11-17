@@ -12,9 +12,10 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { ownerFor } from '../lib/store.js'
 import { probeDue, selectProbeCandidates } from '../lib/probe-plan.js'
 import { evaluateSupport, toolClass } from '../lib/support.js'
-import { recallEnabled } from '../index.js'
+import { recallEnabled, reviewLines } from '../index.js'
 import { createChecker, makeStore, reopen } from './harness.mjs'
 
 const check = createChecker()
@@ -446,6 +447,74 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.equal(supported.items.length, 1)
     assert.match(supported.items[0].line, /verified/)
     assert.match(supported.items[0].line, /0\.60 verified/)
+  })
+}
+
+// ------------------------------------------------- review groups (status hint)
+
+{
+  const { store } = makeStore()
+  const trigger = 'deploying this service'
+
+  const first = await store.write({
+    scope: 'project',
+    kind: 'procedure',
+    trigger,
+    claim: 'Deploy by pushing a version tag; the release workflow does the rest.',
+    evidence: 'RELEASE.md',
+    confidence: 0.8,
+    cwd: projectA,
+    origin: 'test',
+  })
+  const second = await store.write({
+    scope: 'project',
+    kind: 'procedure',
+    trigger,
+    claim: 'The helm chart under infra/ is the only supported deployment path.',
+    evidence: 'infra/README.md',
+    confidence: 0.7,
+    cwd: projectA,
+    origin: 'test',
+  })
+
+  check('dissimilar claims under one scope+trigger stay separate and are reported', () => {
+    assert.notEqual(first.record.id, second.record.id)
+    const groups = store.reviewGroups()
+    assert.equal(groups.length, 1)
+    assert.equal(groups[0].ids.length, 2)
+    assert.equal(groups[0].owner, ownerFor('project', projectA))
+    assert.deepEqual(new Set(groups[0].ids), new Set([first.record.id, second.record.id]))
+  })
+
+  await store.write({
+    scope: 'project',
+    kind: 'procedure',
+    trigger,
+    claim: 'Deploy by pushing a version tag; the release workflow does the rest.',
+    evidence: 'RELEASE.md',
+    confidence: 0.8,
+    cwd: projectB,
+    origin: 'test',
+  })
+  check('the same trigger in another project is not the same group', () => {
+    const groups = store.reviewGroups()
+    assert.equal(groups.length, 1)
+    assert.equal(groups[0].owner, ownerFor('project', projectA))
+  })
+
+  await store.setStatus(second.record.id, 'superseded')
+  check('retired or inactive records leave the review list', () => {
+    assert.equal(store.reviewGroups().length, 0)
+    assert.equal(reviewLines([]).length, 0)
+  })
+
+  check('the hint states the fact without calling it a conflict', () => {
+    const text = reviewLines([{ owner: 'project:x', trigger, ids: ['mem_aaa111', 'mem_bbb222'] }]).join('\n')
+    assert.match(text, /more than one active record/)
+    assert.match(text, /may legitimately apply to different conditions/)
+    assert.doesNotMatch(text, /conflict/i)
+    assert.match(text, /aaa111/)
+    assert.match(text, /bbb222/)
   })
 }
 

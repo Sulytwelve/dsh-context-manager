@@ -155,6 +155,30 @@ function resolveId(store, raw) {
   return raw
 }
 
+/**
+ * Render the read-only review hint for `status`.
+ *
+ * Deliberately reports a fact ("more than one active record under one scope and
+ * trigger"), not a conflict: those records may apply to different conditions.
+ * Exported so the wording is testable.
+ *
+ * @param groups - `store.reviewGroups()` output.
+ * @param max - how many groups to list before summarizing the rest.
+ * @returns zero or more lines; empty when nothing needs review.
+ */
+export function reviewLines(groups, max = 3) {
+  if (!Array.isArray(groups) || groups.length === 0) return []
+  const lines = [
+    `needs review: ${groups.length} scope+trigger group(s) where the same scope and trigger hold more than one active record `
+      + '(may legitimately apply to different conditions)',
+  ]
+  for (const group of groups.slice(0, max)) {
+    lines.push(`  - ${group.owner} · "${clip(group.trigger, 90)}" → ${group.ids.map(shortId).join(', ')}`)
+  }
+  if (groups.length > max) lines.push(`  … ${groups.length - max} more group(s)`)
+  return lines
+}
+
 function memoryTool(ctx, store, config) {
   const recallDefaults = config.recall
   return {
@@ -279,6 +303,7 @@ function memoryTool(ctx, store, config) {
           ]
           const recent = store.recentEvents(5)
           if (recent.length > 0) lines.push(`recent: ${recent.map(item => `${item.kind}:${clip(item.detail, 60)}`).join(' | ')}`)
+          lines.push(...reviewLines(store.reviewGroups()))
           return { ok: true, text: lines.join('\n') }
         }
         case 'report': {

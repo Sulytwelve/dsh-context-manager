@@ -189,10 +189,37 @@ reached, or when the same record was already injected in this session. A record
 that is due for a check and cannot get one (budget exhausted) is left out rather
 than served unverified.
 
+## Record lifetime
+
+Nothing expires on a timer. A six-month-old record that is still correct stays
+`active` and can be recalled again; that durability is the point, and automatic
+archival would delete exactly the long-tail knowledge this is for.
+
+| Field | Role |
+|---|---|
+| `lastUsedAt` / `uses` | when it was last recalled, and how often — never an eviction trigger |
+| `updatedAt` | ranking freshness only: ×1.00 up to 7 days, ×0.95 up to 30, ×0.85 after |
+| `lastCheckedAt` | when its probe last ran; a failing probe marks it `stale`, which stops recall until it passes again |
+
+A record with no probe can only be retired by a later write or an explicit
+`forget` / `set_status`. That is why `status` reports scope+trigger groups that
+hold more than one active record: it is the cheap way to notice a superseded
+conclusion that nobody retired, without deleting anything automatically.
+
+Task checkpoints follow a different rule: one is attached automatically only
+while it is younger than `resumeMaxAgeMs` (7 days), but `memory{op:"resume"}`
+still returns it after that until a later task overwrites it.
+
 ## The tool
 
 One tool, `memory`, with operations `recall`, `write`, `forget`, `status`,
 `report`, `checkpoint`, `resume`, `probe`, `feedback`, `set_status`.
+
+`status` also carries a read-only review hint: when the same scope and the same
+trigger hold more than one `active` record, it lists the group and its ids. That
+is a fact to look at, **not** a conflict verdict — one trigger may legitimately
+cover different conditions — and nothing is retired, re-ranked, or recalled
+differently because of it. It appears only when you ask for `status`.
 
 ```jsonc
 // persist one transferable lesson
@@ -206,6 +233,9 @@ One tool, `memory`, with operations `recall`, `write`, `forget`, `status`,
 {"op":"checkpoint","milestone":"reproduced the offset gap",
  "next_action":"fix nextOffset to stop at the first gap",
  "acceptance":"test/offset.test.mjs passes"}
+
+// counters for this session and the store (includes the review hint)
+{"op":"status"}
 
 // measurement
 {"op":"report"}
