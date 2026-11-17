@@ -34,6 +34,9 @@ function summarize(path) {
   let cacheRead = 0
   let recalls = 0
   let toolCalls = 0
+  // Latency runs from the admitted prompt, not from the first recorded event:
+  // a session carries seeded rows such as `permission/preset` whose timestamp
+  // predates it by days and would otherwise dominate the span.
   let first = null
   let last = null
   const tools = new Map()
@@ -42,7 +45,7 @@ function summarize(path) {
     const type = entry.type ?? entry.event?.type
     const time = entry.time ?? entry.event?.time
     if (typeof time === 'number') {
-      if (first === null || time < first) first = time
+      if (type === 'user/message' && (first === null || time < first)) first = time
       if (last === null || time > last) last = time
     }
     const data = entry.data ?? entry.event?.data ?? {}

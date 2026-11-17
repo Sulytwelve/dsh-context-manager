@@ -181,6 +181,30 @@ check('a continuation prompt gets the resume line', () => {
   assert.match(packet.text, /barrier test/)
 })
 
+check('an explicit resume request survives a checkpoint with no shared words', () => {
+  const packet = buildPacket(store, {
+    query: 'What was the last checkpoint here?',
+    cwd: workspace,
+    excludeIds: new Set(),
+    includeResume: true,
+    sessionId: 'session-b',
+    recall: recallConfig,
+  })
+  assert.match(packet.text, /Resume/)
+})
+
+check('a Chinese resume request is recognised too', () => {
+  const packet = buildPacket(store, {
+    query: '上次的进度到哪了？继续吧',
+    cwd: workspace,
+    excludeIds: new Set(),
+    includeResume: true,
+    sessionId: 'session-b',
+    recall: recallConfig,
+  })
+  assert.match(packet.text, /Resume/)
+})
+
 store.bump('session-a', { turns: 2, steps: 5, inputTokens: 12_000, outputTokens: 800, injections: 2, injectionTokens: 180 })
 await store.flushLedger('session-a')
 check('ledger flushes counters', () => {

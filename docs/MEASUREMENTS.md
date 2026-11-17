@@ -120,6 +120,43 @@ before the acceptance check passed. T1 took 5 calls and 7 tool calls with the
 answer already in context, which is the behaviour the packet wording
 (`evidence, not instructions — verify before relying`) explicitly invites.
 
+## Field trial — three real GUI sessions
+
+Not a controlled comparison: three ordinary sessions opened by hand in the
+running Web GUI, measured from their own logs and the plugin ledger. They test
+the plumbing in the product rather than in an orchestrated child session.
+
+| session | cwd | prompt | calls | tool calls | input / cached / output | span | injections |
+|---|---|---|---|---|---|---|---|
+| C | `D:\Develop\AI\DSH` | naming rule, then bundle reload, then “record a fact + checkpoint” | 32 | 39 | 93,490 / 2,183,808 / 22,732 | 172.6 s | 2 (282 tok, 1.0 ms) |
+| A | `D:\Develop\AI\DSH` | “What was the last checkpoint here?” | 4 | 4 | 9,135 / 40,064 / 1,040 | 7.9 s | **0** |
+| B | `…\GXJC\logpipe` | the naming question in an unrelated project | 36 | 35 | 40,176 / 1,171,968 / 10,684 | 80.2 s | **0** |
+
+What each one proved or broke:
+
+- **C** — recall fired at the first step of its first two turns, one record per
+  turn (9 candidates, 7 rejected), and the third turn wrote a durable fact and a
+  curated checkpoint that survived the turn-end heuristic. Its two distillation
+  calls produced one `proposed` record whose `support.reason` exposed the
+  “workspace” contains “works” classifier bug fixed in `c63d2ed`. Cost: the model
+  received the naming rule at step 1 and still spent ~19 calls re-reading
+  `dsh-storage*` sources to verify it.
+- **A** — expected a `Resume` line; got **none**. The resume gate required lexical
+  overlap between the prompt and the checkpoint's own fields, and “last
+  checkpoint” shares no word with “memory 1.1.0 trial”. The model recovered by
+  calling `memory{op:"resume"}`, so the capability worked while the automatic
+  path failed. Fixed by accepting explicit resume intent (`resume`, `continue`,
+  `checkpoint`, `上次`, `继续`, `检查点`, …) without lowering the overlap rule that
+  keeps an unrelated task from paying for a checkpoint.
+- **B** — zero injections in a different project: isolation holds end to end. It
+  also prices the alternative: with no memory the same question cost 36 model
+  calls and 35 tool calls, including a scratch `.probe` directory it created and
+  removed itself.
+
+Session A's span is the ledger's first-to-last activity (7.9 s); `bench/analyze.mjs`
+now reports from the admitted prompt rather than from seeded rows such as
+`permission/preset`, whose timestamps predate the session.
+
 ## Conditional execution — the packet has to earn its place
 
 A trivial prompt (`"Compute 17 * 23"`) in the fixture directory, which has a

@@ -57,6 +57,9 @@ function normalizeConfig(raw) {
 
 const sessionStates = new Map()
 
+/** A prompt that asks to resume does not need to share vocabulary with the checkpoint. */
+const RESUME_INTENT = /(?:\bresume\b|\bcontinue\b|\bcheckpoint\b|pick up|where (?:did|were) (?:i|we) (?:leave|left|stop)|last (?:task|state|checkpoint)|上次|继续|接着|检查点|断点|进度)/i
+
 function stateOf(sessionId) {
   let state = sessionStates.get(sessionId)
   if (state === undefined) {
@@ -358,7 +361,12 @@ export function buildPacket(store, options) {
         .filter(value => typeof value === 'string' && value !== '')
         .join(' ')
       const query = String(options.query ?? '')
-      const relevant = query.trim() === '' || similarity(query, checkpointText) >= 0.08
+      // An explicit "where did I leave off" must not depend on lexical overlap
+      // with the checkpoint's own words: "what was the last checkpoint here"
+      // shares nothing with a milestone like "memory 1.1.0 trial".
+      const relevant = query.trim() === ''
+        || RESUME_INTENT.test(query)
+        || similarity(query, checkpointText) >= 0.08
       if (relevant) {
         resume = `Resume (${age(Date.now() - checkpoint.updatedAt)} ago): ${renderCheckpoint(checkpoint)}`
         tokens += estimateTokens(resume) + 1

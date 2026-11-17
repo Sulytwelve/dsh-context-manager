@@ -231,7 +231,7 @@ deterministic fixture created by `node bench/setup.mjs`.
 ## Development
 
 ```bash
-node test/smoke.mjs        # 15 store-level checks, no DSH required
+node test/smoke.mjs        # 17 store-level checks, no DSH required
 node test/regression.mjs   # 26 isolation / probe / evidence regression checks
 node bench/setup.mjs       # build the benchmark fixture
 node bench/analyze.mjs <session.v4.jsonl.zstd>   # per-session calls/tokens/wall
