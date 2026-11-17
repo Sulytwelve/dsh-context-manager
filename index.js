@@ -311,12 +311,12 @@ function memoryTool(ctx, store, config) {
   }
 }
 
-function renderCheckpoint(record) {
+function renderCheckpoint(record, fieldLimit = 160) {
   const parts = [`checkpoint ${age(Date.now() - record.updatedAt)} ago`]
-  if (record.milestone) parts.push(`done: ${record.milestone}`)
-  if (record.nextAction) parts.push(`next: ${record.nextAction}`)
-  if (record.openQuestion) parts.push(`open: ${record.openQuestion}`)
-  if (record.acceptance) parts.push(`accept: ${record.acceptance}`)
+  if (record.milestone) parts.push(`done: ${clip(record.milestone, fieldLimit)}`)
+  if (record.nextAction) parts.push(`next: ${clip(record.nextAction, fieldLimit + 20)}`)
+  if (record.openQuestion) parts.push(`open: ${clip(record.openQuestion, fieldLimit)}`)
+  if (record.acceptance) parts.push(`accept: ${clip(record.acceptance, fieldLimit)}`)
   return parts.join(' | ')
 }
 
@@ -368,7 +368,12 @@ export function buildPacket(store, options) {
         || RESUME_INTENT.test(query)
         || similarity(query, checkpointText) >= 0.08
       if (relevant) {
-        resume = `Resume (${age(Date.now() - checkpoint.updatedAt)} ago): ${renderCheckpoint(checkpoint)}`
+        const rendered = `Resume (${age(Date.now() - checkpoint.updatedAt)} ago): ${renderCheckpoint(checkpoint)}`
+        // The resume line competes with the records for the same budget. A
+        // chatty checkpoint must not consume all of it: leave at least 40
+        // tokens for items and the footer.
+        const available = Math.max(240, Math.floor((recall.tokenBudget - tokens - 40) * 3.2))
+        resume = clip(rendered, available)
         tokens += estimateTokens(resume) + 1
       }
     }

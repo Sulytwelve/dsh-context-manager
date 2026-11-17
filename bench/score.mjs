@@ -23,8 +23,8 @@ function loadTable(directory, name) {
     if (!file.endsWith('.json')) continue
     const document = JSON.parse(readFileSync(join(directory, name, file), 'utf8'))
     const record = document.record
-    const key = document.key ?? record?.id ?? record?.sessionId ?? record?.cwd
-    map.set(key, record)
+    // The per-record backend names the document after the record key.
+    map.set(document.key ?? file.slice(0, -'.json'.length), record)
   }
   return map
 }

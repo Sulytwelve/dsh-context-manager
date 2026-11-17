@@ -205,6 +205,26 @@ check('a Chinese resume request is recognised too', () => {
   assert.match(packet.text, /Resume/)
 })
 
+await store.checkpoint(workspace, {
+  milestone: 'done-marker '.repeat(40),
+  nextAction: 'next-marker '.repeat(40),
+  openQuestion: 'open-marker '.repeat(40),
+  acceptance: 'accept-marker '.repeat(40),
+  sessionId: 'session-a',
+})
+check('a chatty checkpoint cannot consume the whole packet budget', () => {
+  const packet = buildPacket(store, {
+    query: 'What was the last checkpoint here?',
+    cwd: workspace,
+    excludeIds: new Set(),
+    includeResume: true,
+    sessionId: 'session-b',
+    recall: recallConfig,
+  })
+  assert.match(packet.text, /Resume/)
+  assert.ok(packet.tokens <= recallConfig.tokenBudget, `packet ${packet.tokens} > budget ${recallConfig.tokenBudget}`)
+})
+
 store.bump('session-a', { turns: 2, steps: 5, inputTokens: 12_000, outputTokens: 800, injections: 2, injectionTokens: 180 })
 await store.flushLedger('session-a')
 check('ledger flushes counters', () => {

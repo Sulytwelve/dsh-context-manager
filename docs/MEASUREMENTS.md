@@ -147,7 +147,12 @@ What each one proved or broke:
   calling `memory{op:"resume"}`, so the capability worked while the automatic
   path failed. Fixed by accepting explicit resume intent (`resume`, `continue`,
   `checkpoint`, `上次`, `继续`, `检查点`, …) without lowering the overlap rule that
-  keeps an unrelated task from paying for a checkpoint.
+  keeps an unrelated task from paying for a checkpoint. A re-run after the fix
+  got the line at step 1 and finished in **2 model calls / 3.5 s** instead of 4 /
+  7.9 s — but that re-run also showed the line at **341 tokens**, over the
+  220-token budget, because the checkpoint's fields were printed verbatim. Each
+  field is now clipped and the whole line is capped against the budget: the same
+  checkpoint renders at **149 tokens** (`bench/packet.mjs` prints it).
 - **B** — zero injections in a different project: isolation holds end to end. It
   also prices the alternative: with no memory the same question cost 36 model
   calls and 35 tool calls, including a scratch `.probe` directory it created and

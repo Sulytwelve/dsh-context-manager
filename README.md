@@ -236,6 +236,7 @@ node test/regression.mjs   # 26 isolation / probe / evidence regression checks
 node bench/setup.mjs       # build the benchmark fixture
 node bench/analyze.mjs <session.v4.jsonl.zstd>   # per-session calls/tokens/wall
 node bench/score.mjs "$DSH_HOME/storages/agent_memory" "<query>" --cwd <dir>
+node bench/packet.mjs "$DSH_HOME/storages/agent_memory" "<query>" --cwd <dir>
 ```
 
 `bench/score.mjs` prints every candidate's trigger-coverage breakdown against the
