@@ -8,6 +8,7 @@
  * user's next turn never waits for it.
  */
 
+import { evaluateSupport, renderSupport } from './lib/support.js'
 import { clip, estimateTokens, nowMs, oneLine } from './lib/util.js'
 
 export const name = 'memory-distill'
@@ -78,6 +79,8 @@ function emptySample(sessionId, turn) {
     startedAt: Date.now(),
     userTexts: [],
     tools: [],
+    /** callId → { ok, code } — the observation record a candidate must cite. */
+    results: new Map(),
     edits: [],
     errors: [],
     successAfterError: false,
@@ -120,14 +123,22 @@ function foldEvent(sample, event) {
     }
     case 'tool/call': {
       const name = event.data.name
-      sample.tools.push({ callId: event.data.callId, name, args: clip(event.data.arguments ?? '', 240) })
+      sample.tools.push({
+        ref: `t${sample.tools.length + 1}`,
+        callId: event.data.callId,
+        name,
+        args: clip(event.data.arguments ?? '', 240),
+      })
       if (name === 'write' || name === 'edit' || name === 'str_replace') sample.edits.push(name)
       return
     }
     case 'tool/result': {
+      const callId = event.data.message?.toolCallId
       const error = event.data.error
-      if (error !== undefined || event.data.message?.isError === true) {
-        const name = toolNameOf(sample, event.data.message?.toolCallId) ?? 'tool'
+      const failed = error !== undefined || event.data.message?.isError === true
+      sample.results.set(callId, { ok: !failed, code: error?.code })
+      if (failed) {
+        const name = toolNameOf(sample, callId) ?? 'tool'
         noteError(sample, name, error?.code ?? 'ERROR', error?.reason ?? 'tool reported an error')
         return
       }
@@ -178,21 +189,28 @@ function scoreTurn(sample) {
   return { score, reasons }
 }
 
-/** Build the bounded distillation prompt. */
+/** Build the bounded distillation prompt, including citable observation ids. */
 function buildPrompt(sample) {
-  const tools = sample.tools.slice(-12).map(tool => `${tool.name}(${tool.args})`).join('\n') || '(none)'
+  const tools = sample.tools.slice(-12).map(tool => {
+    const result = sample.results.get(tool.callId)
+    const outcome = result === undefined ? 'no-result' : result.ok ? 'ok' : `failed(${result.code ?? 'ERROR'})`
+    return `${tool.ref} ${tool.name}(${tool.args}) -> ${outcome}`
+  }).join('\n') || '(none)'
   const errors = sample.errors.slice(-6).map(error => `${error.name}: ${error.code} ${error.reason}`).join('\n') || '(none)'
   const files = [...new Set(sample.edits)].join(', ') || '(none)'
   return `Extract durable, transferable memory from one coding-agent turn in this repository.
 
 Return JSON only — [] or up to ${2} objects:
-[{"kind":"procedure|fact|pitfall|preference|decision","trigger":"...","claim":"...","evidence":"...","confidence":0.0}]
+[{"kind":"procedure|fact|pitfall|preference|decision","trigger":"...","claim":"...","evidence_refs":["t1"],"evidence":"...","confidence":0.0}]
 
 Rules:
 - Record only knowledge that will recur and is expensive to rediscover here.
 - trigger: the concrete situation that should surface it (file, symbol, command, error string).
 - claim: the action or rule and its reason, at most two sentences.
-- evidence: the path, command, test, or error that established it.
+- evidence_refs: ids of the successful observations that establish the claim (from TOOLS below).
+  A claim about a command or a test must cite a command that ran. No refs means the
+  candidate is stored as a proposal, not as fact.
+- evidence: where it came from in words (path, command, doc).
 - Skip trivia, one-off values, restatements of the user's request, and unverified guesses.
 - Return [] when nothing qualifies.
 
@@ -311,21 +329,30 @@ async function distillWithModel(ctx, store, config, sample, level) {
 
   const candidates = parseCandidates(text).slice(0, config.llm.maxCandidates)
   let written = 0
+  let promoted = 0
   for (const candidate of candidates) {
     try {
+      // The model only reports what the turn observed; the runtime decides
+      // whether that observation exists, succeeded, and can support this class
+      // of claim. Unsupported candidates are stored as proposals.
+      const verdict = evaluateSupport(candidate, sample)
       const evidence = typeof candidate.evidence === 'string' ? candidate.evidence.trim() : ''
-      // A distilled claim is only "active" when the turn produced an observation
-      // and the candidate cites where it came from; otherwise it is a hypothesis
-      // the next session may verify.
-      const verified = evidence !== '' && candidate.kind !== 'hypothesis' && sample.tools.length > 0
+      if (verdict.sufficient) promoted += 1
       await store.write({
         scope: 'project',
         kind: candidate.kind,
         trigger: candidate.trigger,
         claim: candidate.claim,
-        evidence: evidence || `distilled from session ${sample.sessionId} turn ${sample.turn}`,
-        confidence: verified ? 0.6 : 0.4,
-        status: verified ? undefined : 'proposed',
+        evidence: evidence || renderSupport(sample, verdict.refs ?? [], verdict.reason),
+        confidence: verdict.sufficient ? 0.6 : 0.4,
+        status: verdict.sufficient ? undefined : 'proposed',
+        support: {
+          class: verdict.class ?? 'unsupported',
+          reason: verdict.reason,
+          refs: verdict.refs ?? [],
+          sessionId: sample.sessionId,
+          turn: sample.turn,
+        },
         cwd: sample.cwd,
         origin: `distill:${level}`,
         sessionId: sample.sessionId,
@@ -339,7 +366,8 @@ async function distillWithModel(ctx, store, config, sample, level) {
   store.bump(sample.sessionId, { written })
   await store.event(
     'distill',
-    `${level} call ${elapsed.toFixed(0)}ms, ${inputTokens}/${outputTokens} tok, wrote ${written}/${candidates.length}`,
+    `${level} call ${elapsed.toFixed(0)}ms, ${inputTokens}/${outputTokens} tok, `
+      + `wrote ${written}/${candidates.length} (${promoted} supported by cited observations)`,
     sample.sessionId,
   )
   return written

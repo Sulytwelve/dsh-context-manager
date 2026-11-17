@@ -1,6 +1,6 @@
 {
   "name": "@sulytwelve/dsh-memory-astra62",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Cross-session memory for DeepSeek Harness: durable recall, verified task checkpoints, guarded probes, and adaptive distillation, split into independently toggleable perf tiers.",
   "keywords": [
     "dsh",
@@ -39,7 +39,7 @@
     "icon.svg"
   ],
   "scripts": {
-    "test": "node test/smoke.mjs",
+    "test": "node test/smoke.mjs && node test/regression.mjs",
     "bench:setup": "node bench/setup.mjs"
   },
   "engines": {

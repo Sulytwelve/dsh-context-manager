@@ -4,78 +4,17 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createStore } from '../lib/store.js'
-import { DOMAIN_SPEC } from '../lib/domain.js'
 import { buildPacket } from '../index.js'
+import { createChecker, makeStore } from './harness.mjs'
 
-class FakeTable {
-  constructor() {
-    this.map = new Map()
-  }
-
-  get(key) {
-    return this.map.get(key)
-  }
-
-  entries() {
-    return [...this.map.entries()][Symbol.iterator]()
-  }
-
-  keys() {
-    return [...this.map.keys()][Symbol.iterator]()
-  }
-
-  get size() {
-    return this.map.size
-  }
-
-  async put(key, value) {
-    this.map.set(key, value)
-  }
-
-  async delete(key) {
-    return this.map.delete(key)
-  }
-
-  async deleteMany(keys) {
-    let removed = 0
-    for (const key of keys) if (this.map.delete(key)) removed += 1
-    return removed
-  }
-
-  async update(key, fn) {
-    const next = fn(this.map.get(key))
-    this.map.set(key, next)
-    return next
-  }
-}
-
-function fakeDomain() {
-  const tables = {}
-  for (const name of Object.keys(DOMAIN_SPEC.tables)) tables[name] = new FakeTable()
-  return { name: DOMAIN_SPEC.name, table: name => tables[name], async close() {} }
-}
-
-const config = { maxRecordChars: 2_000, probeMaxBytes: 262_144 }
+const check = createChecker()
+const { store } = makeStore()
 const workspace = mkdtempSync(join(tmpdir(), 'memory-smoke-'))
 writeFileSync(join(workspace, 'fixture.js'), 'export const checkpointCoordinator = true\n')
-
-const results = []
-function check(label, fn) {
-  try {
-    fn()
-    results.push(`PASS ${label}`)
-  } catch (error) {
-    results.push(`FAIL ${label}: ${error.message}`)
-    process.exitCode = 1
-  }
-}
-
-const store = createStore({ domain: fakeDomain(), config, logger: undefined })
 
 await store.write({
   scope: 'project',
@@ -118,29 +57,29 @@ await store.write({
   origin: 'test',
 })
 
-const englishQuery = store.recall({ query: 'resume offsets fixture workers', cwd: workspace, budgetTokens: 220 })
+const englishQuery = store.recall({ query: 'resume offsets fixture workers', cwd: workspace })
 check('english recall finds the procedure', () => {
   assert.ok(englishQuery.items.length >= 1)
   assert.match(englishQuery.items[0].record.trigger, /resume offsets/)
 })
 
-const preferenceQuery = store.recall({ query: 'what commit message style should I use', cwd: workspace, budgetTokens: 220 })
+const preferenceQuery = store.recall({ query: 'what commit message style should I use', cwd: workspace })
 check('user-scope preference is global', () => {
   assert.ok(preferenceQuery.items.some(item => item.record.kind === 'preference'))
 })
 
-const chineseQuery = store.recall({ query: '检查点 偏移 分区', cwd: workspace, budgetTokens: 220 })
+const chineseQuery = store.recall({ query: '检查点 偏移 分区', cwd: workspace })
 check('cjk bigrams retrieve the chinese record', () => {
   assert.ok(chineseQuery.items.some(item => /检查点/.test(item.record.trigger)))
 })
 
-const unrelated = store.recall({ query: 'quantum chromodynamics lattice spacing', cwd: workspace, budgetTokens: 220 })
+const unrelated = store.recall({ query: 'quantum chromodynamics lattice spacing', cwd: workspace })
 check('unrelated query injects nothing', () => {
   assert.equal(unrelated.items.length, 0)
   assert.ok(unrelated.rejected > 0)
 })
 
-const otherWorkspace = store.recall({ query: 'resume offsets fixture workers', cwd: join(workspace, 'elsewhere'), budgetTokens: 220 })
+const otherWorkspace = store.recall({ query: 'resume offsets fixture workers', cwd: join(workspace, 'elsewhere') })
 check('project scope does not leak across directories', () => {
   assert.equal(otherWorkspace.items.length, 0)
 })
@@ -177,7 +116,12 @@ check('a lower-confidence restatement merges without overwriting the verified cl
 })
 
 rmSync(join(workspace, 'fixture.js'))
-const afterDelete = store.recall({ query: 'debugging resume offsets in the parallel importer', cwd: workspace, budgetTokens: 220, probeTtlMs: 0 })
+const afterDelete = store.recall({
+  query: 'debugging resume offsets in the parallel importer',
+  cwd: workspace,
+  // Zero TTL means "check every time", including a record written this instant.
+  probeTtlMs: 0,
+})
 check('a failed probe retires the record', () => {
   assert.ok(!afterDelete.items.some(item => /resume offsets/.test(item.record.trigger)))
   const stale = store.list({ status: 'stale' })
@@ -254,7 +198,7 @@ check('stats count every table', () => {
 })
 
 check('one-line packet rendering is bounded', () => {
-  const english = store.recall({ query: 'commit message style', cwd: workspace, budgetTokens: 220 })
+  const english = store.recall({ query: 'commit message style', cwd: workspace })
   const line = english.items[0]?.line ?? ''
   assert.ok(line.length < 900, `line too long: ${line.length}`)
 })
@@ -262,5 +206,4 @@ check('one-line packet rendering is bounded', () => {
 rmSync(workspace, { recursive: true, force: true })
 await store.close()
 
-console.log(results.join('\n'))
-console.log(`\n${results.filter(line => line.startsWith('PASS')).length}/${results.length} checks passed`)
+check.report('smoke')

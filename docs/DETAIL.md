@@ -23,12 +23,13 @@ recall pass described below.
 
 ## What is stored
 
-A `agentMemory` storage domain with four per-record tables:
+An `agent_memory` storage domain with four per-record tables:
 
-- **memories** — `scope` (`user` / `project` / `session`), `kind`
-  (`preference` / `procedure` / `fact` / `decision` / `pitfall` / `hypothesis`),
-  `trigger` (when it applies), `claim` (the transferable statement), `evidence`
-  (where it came from), `confidence`, usage counters, an optional `probe`, and
+- **memories** — `scope` (`user` / `project` / `session`), the derived `owner`,
+  `kind` (`preference` / `procedure` / `fact` / `decision` / `pitfall` /
+  `hypothesis`), `trigger` (when it applies), `claim` (the transferable
+  statement), `evidence` (where it came from), `confidence`, usage counters, an
+  optional `probe`, `lastCheckedAt`, the `support` class of distilled records, and
   supersession links. Superseded records stay readable.
 - **tasks** — one checkpoint per working directory: milestone, next action,
   unresolved question, acceptance condition, the session that wrote it.
@@ -36,6 +37,16 @@ A `agentMemory` storage domain with four per-record tables:
   input/output tokens, injections and their tokens, probe outcomes, distillation
   calls and their tokens.
 - **events** — a bounded ring of recent memory-system events for `status`.
+
+### One isolation identity
+
+`owner` is `user`, `project:<normalized cwd>`, or `session:<session id>`. Write
+time dedupe, index rebuild, and recall all compare that one string, so a record
+cannot be merged, ranked, or served outside the boundary it was recorded in. A
+restatement in project B can no longer fold into project A's record and inherit
+its wording with B's evidence. Records written before the field existed derive
+their owner from `cwd`/`sessionId`, so an upgrade re-scopes rather than drops
+them.
 
 ## When memory is used
 
@@ -47,7 +58,10 @@ verbose trigger is not punished for its extra words, plus a smaller term for how
 much of the prompt the record explains at all. Confidence, freshness, and
 feedback counters weight the result.
 
-The top records whose check is older than a day are probed; the survivors are
+Candidates due for a check — never checked, or checked longer ago than
+`recall.probeTtlMs`, where `0` means every recall — are probed before they can
+enter the packet. The probe budget is five per recall; a candidate still due
+when the budget runs out is **skipped**, not served unverified. The survivors are
 packed into a token budget (220 tokens by default) and appended as one synthetic
 `recall`-form user message, so the packet is durable, attributable, and visible
 in the transcript. A verbose record is truncated to fit rather than dropped.
@@ -62,8 +76,30 @@ pays nothing.
 model call, as long as no curated checkpoint exists for the session and no fresh
 checkpoint with a next action is already stored. When a turn shows at least three
 tool calls or explicit durable intent **and** scores 4 or more, it may spend one
-bounded request to distill 0–2 records. Candidates without evidence are stored as
-`proposed`, never as fact.
+bounded request to distill 0–2 records.
+
+### What may become fact
+
+A distillation is one non-tool request: it reports what the turn observed, it
+does not observe anything itself. Each candidate must cite tool results from that
+turn (`evidence_refs`, shown to the model as `t1`, `t2`, …). The runtime resolves
+each ref, requires it to have succeeded, and requires the class of tool to
+support the claim:
+
+| Cited result | Supports |
+|---|---|
+| `read` / `grep` / `glob` / `web_fetch` succeeded | “the file or page says X” |
+| a command or terminal call succeeded | “running X works / the test passes” |
+| `write` / `edit` only | nothing on its own |
+| a failed call | nothing |
+
+A claim that asserts an execution *outcome* (“passes”, “fails”, “exits 0”) needs
+a command that actually ran. Everything else is stored as `proposed`, is never
+recalled as fact, and keeps the reason in `support.reason`.
+
+A merge treats `claim + evidence + probe + support` as one version: a
+higher-confidence restatement replaces all of them together (and drops the old
+`lastCheckedAt`), while a lower-confidence one changes none of them.
 
 ## Storage keys
 
@@ -89,10 +125,17 @@ One tool, `memory`, with operations:
 - Retrieval is lexical, not semantic. A record whose vocabulary does not overlap
   the user's wording will not surface; write triggers in the words you would use
   to ask for it.
+- Recall is free of I/O only while no probe is due; a due probe reads its target
+  file, bounded by `probeMaxBytes`. Five probes per recall and 40 per sweep are
+  hard caps.
 - A probe only expresses the checks the recorder declared. Records without a
   probe are never automatically invalidated.
 - Distillation is a single non-tool model call; it cannot read files. Its output
-  is evidence-checked only against the turn's own observations.
+  is evidence-checked only against the turn's own tool results — a candidate that
+  cites nothing, cites a failed call, or makes a behavioural claim without a
+  command that ran stays `proposed`.
+- Self-reported confidence is not calibrated; a record written with
+  `confidence: 0.9` by the model is trusted the same way as one written by hand.
 - Measurement counters are per process until flushed at turn end; a hard crash
   can lose the current turn's counters.
 - Disabling `memory-core` leaves existing data on disk (re-enabling resumes it)

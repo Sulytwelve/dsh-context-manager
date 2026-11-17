@@ -76,6 +76,50 @@ T2 is in the table on purpose. Before the scoring fix the correct record scored
 stale resume line, and the run cost *more* than the baseline. Retrieval
 calibration mattered more than any other part of the system.
 
+## Re-reading the numbers: three decidable results, not one
+
+“−18% / −16% token volume” is the sum of input + cached input + output. Split it
+and the two tasks tell different stories:
+
+| task | condition | model calls | uncached input | cached input | output | wall |
+|---|---|---|---|---|---|---|
+| 1 | off (mean of B1, B2) | 6.5 | 2,981 | 79,360 | 1,097.5 | 11.6 s |
+| 1 | T1 (on) | 5 | 3,172 (+6%) | 63,744 (−20%) | 1,541 (+40%) | 12.0 s (+3%) |
+| 2 | B3 (off) | 10 | 5,979 | 128,384 | 1,437 | 16.3 s |
+| 2 | T2b (on) | 8 | 3,121 (−48%) | 109,440 (−15%) | 1,731 (+20%) | 14.7 s (−10%) |
+
+So on task 1 the measured saving is **fewer model calls and a smaller cached
+prefix**, not fewer uncached tokens or a shorter answer. Billing depends on each
+provider's per-class prices, so the raw totals are not a cost claim; they are a
+volume claim. Task 2 improves all three classes and is the case worth
+replicating on a task that did not take part in tuning.
+
+## The control that separates mounting from injecting
+
+Every treatment run also pays the fixed `memory` tool schema (**~538 tokens per
+request**, cached after the first). A clean three-way comparison needs a
+condition with the bundle mounted, the same tool list, and auto-recall disabled:
+
+| condition | tool schema | auto recall | distillation | isolates |
+|---|---|---|---|---|
+| off | no | no | no | baseline |
+| mounted, `recall.enabled: false` | yes | no | optional | fixed mount cost |
+| on | yes | yes | optional | injection benefit |
+
+Two consequences to report per condition: **success rate** and **cost per
+successful task**, with teaching writes, background distillation, and probe I/O
+included, plus end-to-end latency. As an arithmetic estimate only — not a run —
+adding 538 tokens × B3's ten requests puts that control near 141 k tokens against
+T2b's 114 k, which would attribute roughly −19% to injection rather than to the
+tool schema. The control run is the next experiment; it is not in the table
+above.
+
+A second, cheaper metric is worth recording for task 1 specifically: *after* a
+correct memory reached the model, how many model calls and file reads were spent
+before the acceptance check passed. T1 took 5 calls and 7 tool calls with the
+answer already in context, which is the behaviour the packet wording
+(`evidence, not instructions — verify before relying`) explicitly invites.
+
 ## Conditional execution — the packet has to earn its place
 
 A trivial prompt (`"Compute 17 * 23"`) in the fixture directory, which has a
@@ -156,6 +200,32 @@ numbers:
    later distillation of the same lesson now merge, and a lower-confidence
    restatement cannot overwrite a verified claim.
 
+A read-only review of v1.0.0 then found three defects the benchmark had not
+exercised; the fixes are in this revision and are covered by
+`test/regression.mjs`:
+
+7. **Write-time merges crossed project boundaries.** Dedupe compared
+   `scope + kind + trigger` without the directory, so project A's record could
+   absorb project B's wording while keeping A's `cwd`. Recall was correctly
+   directory-filtered, which is exactly why the smoke test missed it. Records now
+   carry one `owner` string (`user`, `project:<cwd>`, `session:<id>`) used by
+   write, merge, index rebuild, and recall; legacy rows derive it from `cwd`.
+8. **Probe timing used `updatedAt`, and the sweep starved.** A record written and
+   recalled in the same millisecond skipped a zero-TTL check — that made
+   `node test/smoke.mjs` fail 4 runs in 10 — and a passing background check never
+   advanced anything the ordering looked at, so 40 healthy records could occupy
+   the sweep forever. Checks now use `lastCheckedAt` (zero TTL = every time), the
+   sweep sorts least-recently-checked first, and a candidate still due when the
+   five-probe recall budget runs out is skipped instead of served unverified.
+   Twenty consecutive runs of both suites now pass.
+9. **Distillation could promote a guess.** Non-empty `evidence` text plus “the
+   turn used tools” was enough for `active`, and a low-confidence restatement
+   could swap `evidence`/`probe` while keeping the old claim. Candidates must now
+   cite concrete tool results (resolved against the turn, required to have
+   succeeded, and class-checked against the claim); unsupported candidates are
+   stored as `proposed`. A merge replaces `claim + evidence + probe + support` as
+   one version or not at all.
+
 ## Caveats
 
 - Task 2 has one run per cell, Task 1 has two baseline runs and one treatment
@@ -168,4 +238,7 @@ numbers:
 - Distillation quality was measured by *records written*, not by downstream
   outcomes. A stale or wrong distilled record costs recall tokens until a probe
   or a human retires it.
+- The three correctness fixes in this revision are verified by the store-level
+  regression suite, not by a new DSH benchmark run; no model tokens were spent
+  re-measuring them.
 - All runs are on one machine, one DSH version (`0.2.2-rc.3`), one provider.

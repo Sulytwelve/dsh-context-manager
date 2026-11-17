@@ -43,4 +43,4 @@
         intervalMs: 900000
         initialDelayMs: 8000
         maxPerSweep: 40
-        graceMs: 600000
+        recheckMs: 3600000

@@ -8,6 +8,7 @@
  * this row is the low-priority hygiene loop for records nobody has asked for.
  */
 
+import { selectProbeCandidates } from './lib/probe-plan.js'
 import { nowMs, oneLine, runProbe } from './lib/util.js'
 
 export const name = 'memory-probe'
@@ -20,7 +21,7 @@ const DEFAULTS = {
   intervalMs: 900_000,
   initialDelayMs: 8_000,
   maxPerSweep: 40,
-  graceMs: 600_000,
+  recheckMs: 3_600_000,
   maxBytes: 262_144,
 }
 
@@ -30,6 +31,8 @@ function normalizeConfig(raw) {
     ...DEFAULTS,
     ...input,
     enabled: input.enabled !== false,
+    // `graceMs` was the old name for the minimum age between checks.
+    recheckMs: Number(input.recheckMs ?? input.graceMs ?? DEFAULTS.recheckMs),
   }
 }
 
@@ -56,11 +59,13 @@ export function apply(ctx, rawConfig) {
     let revived = 0
     try {
       const now = Date.now()
-      const candidates = store.list({ limit: 5_000 })
-        .filter(record => (record.status === 'active' || record.status === 'stale')
-          && record.probe !== undefined
-          && now - (record.updatedAt ?? 0) > config.graceMs)
-        .slice(0, config.maxPerSweep)
+      // Least-recently-checked first, so a batch of healthy records cannot keep
+      // the sweep away from an older record that has started to fail.
+      const candidates = selectProbeCandidates(store.list({ limit: 5_000 }), {
+        now,
+        recheckMs: config.recheckMs,
+        max: config.maxPerSweep,
+      })
 
       for (const record of candidates) {
         if (ctx.fiber?.assertActive !== undefined) {
