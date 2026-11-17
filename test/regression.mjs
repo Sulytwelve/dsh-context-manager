@@ -326,6 +326,23 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.equal(verdict.reason, 'cited-tools-support-nothing')
   })
 
+  check('word substrings do not turn a documentary claim behavioural', () => {
+    // "workspace" contains "works" and "bypasses" contains "passes"; neither is
+    // an execution outcome, so a successful read still supports the claim.
+    const workspaceClaim = evaluateSupport(
+      { claim: 'A domain name must match the lowercase rule in this workspace.', evidence_refs: ['t1'] },
+      sample,
+    )
+    assert.equal(workspaceClaim.sufficient, true)
+    assert.equal(workspaceClaim.class, 'documented')
+
+    const bypassClaim = evaluateSupport(
+      { claim: 'The single-worker fixture bypasses the checkpoint coordinator.', evidence_refs: ['t1'] },
+      sample,
+    )
+    assert.equal(bypassClaim.sufficient, true)
+  })
+
   check('tool classification covers the shell and observation families', () => {
     assert.equal(toolClass('pwsh'), 'verification')
     assert.equal(toolClass('terminal_session'), 'verification')
