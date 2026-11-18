@@ -21,7 +21,7 @@ import { normalizeCwdOn, runProbe, safeKey, normalizeCwd } from '../lib/util.js'
 import { ownerFor } from '../lib/store.js'
 import { probeDue, selectProbeCandidates } from '../lib/probe-plan.js'
 import { evaluateSupport, toolClass } from '../lib/support.js'
-import { recallEnabled, reviewLines } from '../index.js'
+import { recallEnabled, rejectReportLines, reviewLines } from '../index.js'
 import { createChecker, makeStore, reopen, TEST_CONFIG } from './harness.mjs'
 
 const check = createChecker()
@@ -1037,6 +1037,125 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
   check('a non-retryable open failure is reported without retrying', () => {
     assert.match(String(nonRetryable?.message), /backend-not-found/)
     assert.equal(otherAttempts, 1)
+  })
+}
+
+// ------------------------------------------------ rejection reasons and import
+
+{
+  const { store } = makeStore()
+  await store.write({
+    scope: 'project',
+    kind: 'fact',
+    trigger: 'alpha release checklist',
+    claim: 'Alpha releases need the migration dry run before tagging.',
+    cwd: projectA,
+    origin: 'test',
+  })
+  await store.write({
+    scope: 'project',
+    kind: 'fact',
+    trigger: 'unrelated beta note',
+    claim: 'Beta fixtures live under build/beta on the build machine.',
+    cwd: projectA,
+    origin: 'test',
+  })
+  const privatePreference = await store.write({
+    scope: 'user',
+    kind: 'preference',
+    trigger: 'alpha personal habit',
+    claim: 'Prefers alpha builds when testing quietly at night.',
+    sensitivity: 'private',
+    origin: 'test',
+  })
+
+  const result = store.recall({
+    query: 'alpha release checklist',
+    cwd: projectA,
+    sessionId: 'reject-session',
+    gatePrivate: true,
+    visibility: 'public',
+    probeOnRecall: false,
+  })
+  check('recall reports why candidates were rejected', () => {
+    assert.ok((result.rejectedByReason['no-term-overlap'] ?? 0) >= 1)
+    assert.equal(result.rejectedByReason.private, 1)
+    assert.ok(result.rejectedTop.length >= 1)
+    assert.ok(result.rejectedTop.every(item => typeof item.reason === 'string'))
+    assert.ok(result.rejectedTop.some(item => item.reason === 'private'))
+    assert.equal(store.rejectsOf('reject-session')?.byReason.private, 1)
+  })
+
+  check('report names a private-gated record only as withheld outside a private session', () => {
+    const entry = store.rejectsOf('reject-session')
+    const publicText = rejectReportLines(entry, 'public').join('\n')
+    assert.match(publicText, /private 1/)
+    assert.match(publicText, /\[withheld private\]/)
+    assert.equal(publicText.includes(privatePreference.record.id.slice(-6)), false)
+    const privateText = rejectReportLines(entry, 'private').join('\n')
+    assert.equal(privateText.includes(privatePreference.record.id.slice(-6)), true)
+  })
+
+  const source = makeStore().store
+  await source.write({
+    scope: 'project',
+    kind: 'procedure',
+    trigger: 'importing an exported store',
+    claim: 'Import maps rows back by owner and dedupe key, never by claim similarity.',
+    evidence: 'docs/DETAIL.md',
+    confidence: 0.9,
+    cwd: projectA,
+    origin: 'test',
+  })
+  await source.write({
+    scope: 'user',
+    kind: 'preference',
+    trigger: 'reviewed preference',
+    claim: 'This reviewable preference is explicitly public.',
+    sensitivity: 'public',
+    origin: 'test',
+  })
+  const exported = source.exportRecords({}).rows.map(record => source.exportRow(record))
+  const target = makeStore().store
+  const imported = await target.importRows(exported)
+  check('an export imports into an empty store with ids, keys and timestamps intact', () => {
+    assert.equal(imported.inserted, 2)
+    assert.deepEqual(target.exportRecords({}).rows.map(record => target.exportRow(record)), exported)
+  })
+  const again = await target.importRows(exported)
+  check('a repeated import is a no-op', () => {
+    assert.equal(again.skipped, 2)
+    assert.deepEqual(target.exportRecords({}).rows.map(record => target.exportRow(record)), exported)
+  })
+
+  const newer = exported.map(row => row.trigger === 'importing an exported store'
+    ? { ...row, claim: 'Import maps rows by owner and dedupe key; never rewrite by claim.', updatedAt: row.updatedAt + 60_000, confidence: 0.2, status: 'proposed' }
+    : row)
+  await target.importRows(newer)
+  const afterNewer = target.list({ limit: 10 }).find(record => record.key === exported.find(row => row.trigger === 'importing an exported store').dedupeKey)
+  check('a newer imported row wins while confidence and status are never demoted', () => {
+    assert.match(afterNewer.claim, /never rewrite by claim/)
+    assert.equal(afterNewer.confidence, 0.9)
+    assert.equal(afterNewer.status, 'active')
+  })
+
+  const older = exported.map(row => row.trigger === 'importing an exported store'
+    ? { ...row, claim: 'An older export must not overwrite the newer one.', updatedAt: row.updatedAt - 60_000 }
+    : row)
+  await target.importRows(older)
+  const afterOlder = target.list({ limit: 10 }).find(record => record.key === exported.find(row => row.trigger === 'importing an exported store').dedupeKey)
+  check('an older imported row is skipped', () => {
+    assert.match(afterOlder.claim, /never rewrite by claim/)
+  })
+
+  const rejected = await target.importRows([
+    { type: 'memory', format: 2, id: 'x', dedupeKey: 'k', trigger: 'a trigger', claim: 'a claim long enough' },
+    { type: 'memory', format: 1, id: 'y' },
+    { type: 'export', format: 1 },
+  ])
+  check('import rejects wrong formats and incomplete rows', () => {
+    assert.equal(rejected.rejected, 3)
+    assert.equal(rejected.inserted, 0)
   })
 }
 

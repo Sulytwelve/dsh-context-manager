@@ -1,5 +1,12 @@
 # Design a token-efficient coding agent
 
+> **Version note (2026-11-18).** This brief was written against
+> `@sulytwelve/dsh-context-manager` v1.1.4 as the design baseline. The two traces
+> under "Show the design working" and the acceptance list under "Measure whether
+> the design pays for itself" are this plugin's acceptance plan; the delivered
+> implementation is tracked in `CHANGELOG.md`, which records where the
+> implementation and the measurement results differ from the plan.
+
 Design a long-running coding agent that uses an LLM such as DeepSeek for reasoning and tool selection. Assume I will build it myself. Choose components that fit my runtime and explain the interfaces I need to implement. If I have supplied a codebase, inspect its actual storage, tool, event, and model-call contracts before naming integration points. Otherwise describe those interfaces in provider-neutral terms.
 
 Optimize for **independently verified task completion per token**, with explicit targets for success rate and latency. Account for costs across sessions, including learning a fact, keeping it current, and using it later. A small edit should usually need one short decision. An unfamiliar debugging task should get enough investigation to establish the cause and verify the fix. Give me an implementable design and an evaluation plan. Full source code is optional unless I ask for it.

@@ -214,14 +214,29 @@ unchanged store differ only in `generatedAt`. Filters are `owner`, `scope`,
 `status`, `limit` (default 100, capped at 500), and `offset`. The ledger and
 event tables are intentionally excluded: they are local telemetry, not memory.
 
-Import is **not implemented**. The constraint that shapes it is that write-time
-dedupe is derived from `owner + trigger + claim`, so re-running `write` for an
-imported row can merge two records that carry different ids and can silently
-pick a different winner. A future importer therefore has to use the exported
-`dedupeKey` to map rows back to their original record instead of relying on
-claim similarity; on a conflict the newer `updatedAt` wins, and it must never
-demote `confidence` or `status` as a side effect of importing. Keeping the
-`dedupeKey` in every export line is what makes that mapping possible.
+Import maps rows back by `owner + dedupeKey`, **not** by claim similarity: a
+`write` re-derivation would merge two records that carry different ids and can
+silently pick a different winner. The rules:
+
+- a row whose `updatedAt` is newer replaces the local content; an older or equal
+  row is skipped, which makes an unchanged import idempotent;
+- an import never demotes: `confidence` keeps the higher value and `status` the
+  stronger one (`active` > `proposed` > `stale` > `superseded`), so importing an
+  old export cannot un-verify or un-retire anything;
+- a row with the wrong `format`, or missing `id`, `dedupeKey`, `trigger`, or
+  `claim`, is rejected whole, never partially applied; damaged JSONL lines are
+  skipped and reported by line number;
+- on insert the original `id`, `dedupeKey`, timestamps, counters, provenance,
+  and supersession links are preserved, so `export → import → export` is
+  identical.
+
+`report` appends the last recall's rejection summary for the calling session:
+counts per reason (`no-overlap`, `below-threshold`, `private`, `probe-failed`,
+`probe-budget`, `token-budget`, `packet-limit`) and the three highest-scoring
+rejected candidates. Outside a private session a private-gated candidate is
+printed as `[withheld private]` with no id; that is the same boundary as recall
+itself. The summary is in-memory (one entry per live session) and resets on
+restart, like the rest of the per-session diagnostic state.
 
 ## Tuning retrieval
 

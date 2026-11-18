@@ -230,18 +230,32 @@ still returns it after that until a later task overwrites it. When a turn-end
 write is skipped because another session left a fresh checkpoint in the same
 directory, `status` names that checkpoint instead of losing it silently.
 
+Release history: CHANGELOG.md.
+
 ## The tool
 
 One tool, `memory`, with operations `recall`, `write`, `forget`, `status`,
-`report`, `export`, `checkpoint`, `resume`, `probe`, `feedback`, `set_status`,
-`set_confidence`.
+`report`, `export`, `import`, `checkpoint`, `resume`, `probe`, `feedback`,
+`set_status`, `set_confidence`.
 
 `export` prints JSONL — a header line, then one line per record — sorted by
 owner, dedupe key, and id so two exports of an unchanged store are identical
 apart from timestamps. It is read-only and paginated (`owner`, `scope`, `status`,
 `limit`, `offset`, default page of 100). Each record line carries its `id` and
-`dedupeKey`, which is what a future import would map on; ledger and event rows
-are local telemetry and are not exported.
+`dedupeKey`; ledger and event rows are local telemetry and are not exported.
+
+`import` reads that JSONL back (`path` or inline `payload`) and maps rows to
+records by owner + `dedupeKey`. A newer `updatedAt` wins; an older or equal row is
+skipped, so importing an unchanged export twice changes nothing. Import never
+demotes local state: confidence keeps the higher value and status keeps the
+stronger one. Wrong `format`, or a row missing id/dedupeKey/trigger/claim, is
+rejected rather than partially applied; damaged JSONL lines are reported by line
+number. Export → import → export round-trips identically.
+
+`report` ends with the last recall's rejection summary — reason counts
+(no-overlap, below-threshold, private, probe-failed, probe-budget, token-budget,
+packet-limit) and the three highest-scoring rejected candidates. A private-gated
+candidate is named only as "withheld" in a public session.
 
 `status` also carries a read-only review hint: when the same scope and the same
 trigger hold more than one `active` record, it lists the group and its ids. That
@@ -271,6 +285,9 @@ differently because of it. It appears only when you ask for `status`.
 
 // read-only JSONL of the store, one page at a time
 {"op":"export","status":"active","limit":100,"offset":0}
+
+// restore that JSONL (file or inline); idempotent and never demoting
+{"op":"import","path":"D:/backup/context-manager-export.jsonl"}
 
 // personal content: only visible in a private conversation
 {"op":"write","kind":"preference","scope":"user","sensitivity":"private",
@@ -412,7 +429,7 @@ control design, the invalid runs, and the caveats.
 
 ```bash
 node test/smoke.mjs        # 18 store-level checks, no DSH required
-node test/regression.mjs   # 67 isolation / probe / evidence / privacy regression checks
+node test/regression.mjs   # 74 isolation / probe / evidence / privacy / import checks
 node bench/setup.mjs       # build the benchmark fixture
 node bench/analyze.mjs <session.v4.jsonl.zstd>   # per-session calls/tokens/wall
 node bench/score.mjs "$DSH_HOME/storages/agent_memory" "<query>" --cwd <dir>

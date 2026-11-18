@@ -7,6 +7,7 @@
  * row never calls a model.
  */
 
+import { readFileSync } from 'node:fs'
 import { checkContract } from './lib/contract.js'
 import { openDomainWithRetry } from './lib/domain-open.js'
 import { DOMAIN_SPEC } from './lib/domain.js'
@@ -110,13 +111,15 @@ const PARAMETERS = {
   properties: {
     op: {
       type: 'string',
-      enum: ['recall', 'write', 'forget', 'status', 'report', 'export', 'checkpoint', 'resume', 'probe', 'feedback', 'set_status', 'set_confidence'],
-      description: 'recall|write|forget|status|report|export|checkpoint|resume|probe|feedback|set_status|set_confidence',
+      enum: ['recall', 'write', 'forget', 'status', 'report', 'export', 'import', 'checkpoint', 'resume', 'probe', 'feedback', 'set_status', 'set_confidence'],
+      description: 'recall|write|forget|status|report|export|import|checkpoint|resume|probe|feedback|set_status|set_confidence',
     },
     query: { type: 'string', description: 'Recall query.' },
     limit: { type: 'integer', description: 'Max records (default 5; export default 100).' },
     offset: { type: 'integer', description: 'Export: skip this many rows.' },
     owner: { type: 'string', description: 'Export: filter by owner string.' },
+    path: { type: 'string', description: 'Import: read JSONL from this file.' },
+    payload: { type: 'string', description: 'Import: inline JSONL text (max 8 MB).' },
     id: { type: 'string', description: 'Record id; a short suffix is accepted.' },
     scope: { type: 'string', enum: ['user', 'project', 'session'], description: 'Default: project.' },
     kind: { type: 'string', enum: ['preference', 'procedure', 'fact', 'decision', 'pitfall', 'hypothesis'] },
@@ -199,6 +202,39 @@ export function reviewLines(groups, max = 3) {
     lines.push(`  - ${group.owner} · "${clip(group.trigger, 90)}" → ${group.ids.map(shortId).join(', ')}`)
   }
   if (groups.length > max) lines.push(`  … ${groups.length - max} more group(s)`)
+  return lines
+}
+
+/** Human labels for the rejection reasons the ledger records. */
+const REJECT_LABELS = {
+  'no-term-overlap': 'no-overlap',
+  'below-threshold': 'below-threshold',
+  private: 'private',
+  'probe-failed': 'probe-failed',
+  'probe-budget': 'probe-budget',
+  'token-budget': 'token-budget',
+  'packet-limit': 'packet-limit',
+}
+
+/**
+ * Render the last recall's rejection summary for `report`.
+ *
+ * `report` is shown to the model in whatever conversation it was called from,
+ * so a private-gated record is named only as "withheld" outside a private
+ * session: the reason is useful, the identity is not shareable.
+ *
+ * Exported so the wording and the redaction are testable.
+ */
+export function rejectReportLines(entry, visibility = 'public') {
+  if (entry === undefined || entry === null) return []
+  const counts = Object.entries(entry.byReason ?? {})
+    .map(([reason, count]) => `${REJECT_LABELS[reason] ?? reason} ${count}`)
+  const lines = [`last recall rejects: ${counts.length > 0 ? counts.join(', ') : 'none'}`]
+  const top = (entry.top ?? []).map(item => {
+    if (item.reason === 'private' && visibility !== 'private') return '[withheld private]'
+    return `[${shortId(item.id)}] ${item.relevance} ${REJECT_LABELS[item.reason] ?? item.reason}`
+  })
+  if (top.length > 0) lines.push(`top rejected: ${top.join(' | ')}`)
   return lines
 }
 
@@ -407,6 +443,7 @@ function memoryTool(ctx, store, config) {
           }, { steps: 0, input: 0, output: 0, injections: 0, injectionTokens: 0, distillCalls: 0, distillTokens: 0 })
           lines.push(`total: sessions ${rows.length}, steps ${totals.steps}, tok ${totals.input}/${totals.output}, `
             + `injections ${totals.injections} (${totals.injectionTokens}tok), distill ${totals.distillCalls} (${totals.distillTokens}tok)`)
+          lines.push(...rejectReportLines(store.rejectsOf(sessionId), store.sessionVisibility(sessionId)))
           return { ok: true, text: lines.join('\n') }
         }
         case 'export': {
@@ -436,6 +473,56 @@ function memoryTool(ctx, store, config) {
           const rows = result.rows.map(record => JSON.stringify(store.exportRow(record)))
           await store.event('export', `${result.rows.length}/${result.total} record(s) at offset ${result.offset}`, sessionId)
           return { ok: true, text: [JSON.stringify(header), ...rows].join('\n') }
+        }
+        case 'import': {
+          const inline = typeof args.payload === 'string' ? args.payload : undefined
+          const fromPath = typeof args.path === 'string' && args.path !== '' ? args.path : undefined
+          if (inline === undefined && fromPath === undefined) throw new Error('import needs `payload` or `path`')
+          let text = inline
+          if (text === undefined) {
+            try {
+              text = readFileSync(fromPath, 'utf8')
+            } catch (error) {
+              throw new Error(`cannot read import file "${fromPath}": ${String(error?.message ?? error)}`)
+            }
+          }
+          if (text.length > 8_000_000) throw new Error('import payload is too large (max 8 MB)')
+          const malformed = []
+          const rows = []
+          for (const [index, rawLine] of text.split(/\r?\n/).entries()) {
+            const line = rawLine.trim()
+            if (line === '') continue
+            let parsed
+            try {
+              parsed = JSON.parse(line)
+            } catch {
+              malformed.push(index + 1)
+              continue
+            }
+            if (parsed?.type === 'export') {
+              if (parsed.format !== EXPORT_FORMAT) {
+                throw new Error(`unsupported export format ${String(parsed.format)}; this build imports format ${EXPORT_FORMAT}`)
+              }
+              continue
+            }
+            rows.push(parsed)
+          }
+          if (rows.length === 0) {
+            throw new Error(`no records to import${malformed.length > 0 ? ` (malformed lines: ${malformed.slice(0, 5).join(', ')})` : ''}`)
+          }
+          const summary = await store.importRows(rows)
+          await store.event(
+            'import',
+            `${summary.inserted} new, ${summary.updated} updated, ${summary.skipped} unchanged, ${summary.rejected} rejected`,
+            sessionId,
+          )
+          const skipped = malformed.length > 0
+            ? `; malformed lines skipped: ${malformed.slice(0, 5).join(', ')}${malformed.length > 5 ? '…' : ''}`
+            : ''
+          return {
+            ok: true,
+            text: `import: ${summary.inserted} new, ${summary.updated} updated, ${summary.skipped} unchanged, ${summary.rejected} rejected${skipped}`,
+          }
         }
         default:
           throw new Error(`unsupported op "${String(args.op)}"`)
