@@ -58,29 +58,29 @@ await store.write({
   origin: 'test',
 })
 
-const englishQuery = store.recall({ query: 'resume offsets fixture workers', cwd: workspace })
+const englishQuery = await store.recall({ query: 'resume offsets fixture workers', cwd: workspace })
 check('english recall finds the procedure', () => {
   assert.ok(englishQuery.items.length >= 1)
   assert.match(englishQuery.items[0].record.trigger, /resume offsets/)
 })
 
-const preferenceQuery = store.recall({ query: 'what commit message style should I use', cwd: workspace })
+const preferenceQuery = await store.recall({ query: 'what commit message style should I use', cwd: workspace })
 check('user-scope preference is global', () => {
   assert.ok(preferenceQuery.items.some(item => item.record.kind === 'preference'))
 })
 
-const chineseQuery = store.recall({ query: '检查点 偏移 分区', cwd: workspace })
+const chineseQuery = await store.recall({ query: '检查点 偏移 分区', cwd: workspace })
 check('cjk bigrams retrieve the chinese record', () => {
   assert.ok(chineseQuery.items.some(item => /检查点/.test(item.record.trigger)))
 })
 
-const unrelated = store.recall({ query: 'quantum chromodynamics lattice spacing', cwd: workspace })
+const unrelated = await store.recall({ query: 'quantum chromodynamics lattice spacing', cwd: workspace })
 check('unrelated query injects nothing', () => {
   assert.equal(unrelated.items.length, 0)
   assert.ok(unrelated.rejected > 0)
 })
 
-const otherWorkspace = store.recall({ query: 'resume offsets fixture workers', cwd: join(workspace, 'elsewhere') })
+const otherWorkspace = await store.recall({ query: 'resume offsets fixture workers', cwd: join(workspace, 'elsewhere') })
 check('project scope does not leak across directories', () => {
   assert.equal(otherWorkspace.items.length, 0)
 })
@@ -117,7 +117,7 @@ check('a lower-confidence restatement merges without overwriting the verified cl
 })
 
 rmSync(join(workspace, 'fixture.js'))
-const afterDelete = store.recall({
+const afterDelete = await store.recall({
   query: 'debugging resume offsets in the parallel importer',
   cwd: workspace,
   // Zero TTL means "check every time", including a record written this instant.
@@ -157,8 +157,8 @@ const recallConfig = {
   resumeMaxAgeMs: 604_800_000,
 }
 
-check('an unrelated prompt gets no packet even when a checkpoint exists', () => {
-  const packet = buildPacket(store, {
+await check('an unrelated prompt gets no packet even when a checkpoint exists', async () => {
+  const packet = await buildPacket(store, {
     query: 'compute 17 * 23',
     cwd: workspace,
     excludeIds: new Set(),
@@ -169,8 +169,8 @@ check('an unrelated prompt gets no packet even when a checkpoint exists', () => 
   assert.equal(packet.text, '')
 })
 
-check('a continuation prompt gets the resume line', () => {
-  const packet = buildPacket(store, {
+await check('a continuation prompt gets the resume line', async () => {
+  const packet = await buildPacket(store, {
     query: 'resume the offset skip debugging: add the barrier test and reproduce the offset',
     cwd: workspace,
     excludeIds: new Set(),
@@ -182,8 +182,8 @@ check('a continuation prompt gets the resume line', () => {
   assert.match(packet.text, /barrier test/)
 })
 
-check('an explicit resume request survives a checkpoint with no shared words', () => {
-  const packet = buildPacket(store, {
+await check('an explicit resume request survives a checkpoint with no shared words', async () => {
+  const packet = await buildPacket(store, {
     query: 'What was the last checkpoint here?',
     cwd: workspace,
     excludeIds: new Set(),
@@ -194,8 +194,8 @@ check('an explicit resume request survives a checkpoint with no shared words', (
   assert.match(packet.text, /Resume/)
 })
 
-check('a Chinese resume request is recognised too', () => {
-  const packet = buildPacket(store, {
+await check('a Chinese resume request is recognised too', async () => {
+  const packet = await buildPacket(store, {
     query: '上次的进度到哪了？继续吧',
     cwd: workspace,
     excludeIds: new Set(),
@@ -213,8 +213,8 @@ await store.checkpoint(workspace, {
   acceptance: 'accept-marker '.repeat(40),
   sessionId: 'session-a',
 })
-check('a chatty checkpoint cannot consume the whole packet budget', () => {
-  const packet = buildPacket(store, {
+await check('a chatty checkpoint cannot consume the whole packet budget', async () => {
+  const packet = await buildPacket(store, {
     query: 'What was the last checkpoint here?',
     cwd: workspace,
     excludeIds: new Set(),
@@ -242,8 +242,8 @@ check('stats count every table', () => {
   assert.equal(stats.byStatus.stale, 1)
 })
 
-check('one-line packet rendering is bounded', () => {
-  const english = store.recall({ query: 'commit message style', cwd: workspace })
+await check('one-line packet rendering is bounded', async () => {
+  const english = await store.recall({ query: 'commit message style', cwd: workspace })
   const line = english.items[0]?.line ?? ''
   assert.ok(line.length < 900, `line too long: ${line.length}`)
 })
@@ -251,4 +251,4 @@ check('one-line packet rendering is bounded', () => {
 rmSync(workspace, { recursive: true, force: true })
 await store.close()
 
-check.report('smoke')
+await check.report('smoke')

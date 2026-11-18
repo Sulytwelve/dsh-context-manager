@@ -67,9 +67,9 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.match(second.record.claim, /--workers=4/)
   })
 
-  check('each project recalls only its own command', () => {
-    const a = store.recall({ query: 'full test suite command', cwd: projectA })
-    const b = store.recall({ query: 'full test suite command', cwd: projectB })
+  await check('each project recalls only its own command', async () => {
+    const a = await store.recall({ query: 'full test suite command', cwd: projectA })
+    const b = await store.recall({ query: 'full test suite command', cwd: projectB })
     assert.equal(a.items.length, 1)
     assert.equal(b.items.length, 1)
     assert.match(a.items[0].record.claim, /--workers=2/)
@@ -78,9 +78,9 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
 
   // A restart rebuilds the index from the records: the isolation must survive it.
   const reopened = reopen(domain)
-  check('project isolation survives an index rebuild', () => {
-    const a = reopened.recall({ query: 'full test suite command', cwd: projectA })
-    const b = reopened.recall({ query: 'full test suite command', cwd: projectB })
+  await check('project isolation survives an index rebuild', async () => {
+    const a = await reopened.recall({ query: 'full test suite command', cwd: projectA })
+    const b = await reopened.recall({ query: 'full test suite command', cwd: projectB })
     assert.equal(a.items.length, 1)
     assert.equal(b.items.length, 1)
     assert.match(a.items[0].record.claim, /--workers=2/)
@@ -97,10 +97,10 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     cwd: projectA,
     origin: 'test',
   })
-  check('a restatement still merges inside its own project only', () => {
+  await check('a restatement still merges inside its own project only', async () => {
     assert.equal(third.record.id, first.record.id)
     assert.equal(store.list({ status: 'active' }).length, 2)
-    const b = store.recall({ query: 'full test suite command', cwd: projectB })
+    const b = await store.recall({ query: 'full test suite command', cwd: projectB })
     assert.match(b.items[0].record.claim, /--workers=4/)
   })
 
@@ -108,10 +108,10 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
   const legacy = store.list({ status: 'active' }).find(record => record.cwd === projectB)
   const { owner, ...withoutOwner } = legacy
   await store.domain.table('memories').put(legacy.id, withoutOwner)
-  check('a record without an owner field still scopes to its directory', () => {
+  await check('a record without an owner field still scopes to its directory', async () => {
     const rebuilt = reopen(store.domain)
-    assert.equal(rebuilt.recall({ query: 'full test suite command', cwd: projectA }).items.length, 1)
-    assert.equal(rebuilt.recall({ query: 'full test suite command', cwd: projectB }).items.length, 1)
+    assert.equal((await rebuilt.recall({ query: 'full test suite command', cwd: projectA })).items.length, 1)
+    assert.equal((await rebuilt.recall({ query: 'full test suite command', cwd: projectB })).items.length, 1)
   })
 }
 
@@ -146,10 +146,10 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.equal(store.list({ status: 'active' }).length, 2)
   })
 
-  check('a session recalls only its own decision', () => {
-    const one = store.recall({ query: 'public API rename or keep', cwd: projectA, sessionId: 'session-1' })
-    const two = store.recall({ query: 'public API rename or keep', cwd: projectA, sessionId: 'session-2' })
-    const none = store.recall({ query: 'public API rename or keep', cwd: projectA, sessionId: 'session-3' })
+  await check('a session recalls only its own decision', async () => {
+    const one = await store.recall({ query: 'public API rename or keep', cwd: projectA, sessionId: 'session-1' })
+    const two = await store.recall({ query: 'public API rename or keep', cwd: projectA, sessionId: 'session-2' })
+    const none = await store.recall({ query: 'public API rename or keep', cwd: projectA, sessionId: 'session-3' })
     assert.equal(one.items.length, 1)
     assert.equal(two.items.length, 1)
     assert.match(one.items[0].record.claim, /Keep the old public API/)
@@ -157,8 +157,8 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.equal(none.items.length, 0)
   })
 
-  check('session records never surface without a session id', () => {
-    const anonymous = store.recall({ query: 'public API rename or keep', cwd: projectA })
+  await check('session records never surface without a session id', async () => {
+    const anonymous = await store.recall({ query: 'public API rename or keep', cwd: projectA })
     assert.equal(anonymous.items.length, 0)
   })
 }
@@ -185,8 +185,8 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
   })
   rmSync(target)
 
-  check('zero TTL checks a record written in the same millisecond', () => {
-    const result = store.recall({ query: 'probe target file contents', cwd: dir, probeTtlMs: 0 })
+  await check('zero TTL checks a record written in the same millisecond', async () => {
+    const result = await store.recall({ query: 'probe target file contents', cwd: dir, probeTtlMs: 0 })
     assert.equal(result.probeLines.length, 1, 'the probe should have run')
     assert.equal(result.items.length, 0, 'the failed record must not be served')
     assert.equal(store.list({ status: 'stale' }).length, 1)
@@ -255,7 +255,7 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
   }
   rmSync(join(dir, 'failing.txt'))
 
-  const all = store.recall({ query: 'budget probe target record fixture', cwd: dir, probeTtlMs: 0, budgetTokens: 4000, limit: 10, probeBudget: 5 })
+  const all = await store.recall({ query: 'budget probe target record fixture', cwd: dir, probeTtlMs: 0, budgetTokens: 4000, limit: 10, probeBudget: 5 })
   check('a candidate still due when the probe budget runs out is skipped, not served', () => {
     assert.equal(all.probeLines.length, 5)
     assert.equal(all.probeSkipped, 1)
@@ -263,7 +263,7 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.ok(!all.items.some(item => /record number 5/.test(item.record.claim)))
   })
 
-  const enough = store.recall({ query: 'budget probe target record fixture', cwd: dir, probeTtlMs: 0, budgetTokens: 4000, limit: 10, probeBudget: 6 })
+  const enough = await store.recall({ query: 'budget probe target record fixture', cwd: dir, probeTtlMs: 0, budgetTokens: 4000, limit: 10, probeBudget: 6 })
   check('with enough budget the failing sixth record is probed and excluded', () => {
     assert.equal(enough.probeSkipped, 0)
     assert.equal(enough.probeFails, 1)
@@ -442,13 +442,13 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     origin: 'distill:short',
   })
 
-  const checked = store.recall({ query: 'checking the marker file before a release', cwd: dir })
+  const checked = await store.recall({ query: 'checking the marker file before a release', cwd: dir })
   check('a checked record reports when its evidence was verified', () => {
     assert.equal(checked.items.length, 1)
     assert.match(checked.items[0].line, /·checked /)
   })
 
-  const supported = store.recall({ query: 'verifying the release command', cwd: dir })
+  const supported = await store.recall({ query: 'verifying the release command', cwd: dir })
   check('a distilled record reports the class of evidence behind it', () => {
     assert.equal(supported.items.length, 1)
     assert.match(supported.items[0].line, /verified/)
@@ -535,20 +535,20 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
   writeFileSync(join(dir, 'tail.txt'), `${'a'.repeat(300_000)}NEEDLE`)
   writeFileSync(join(dir, 'small.txt'), 'nothing here')
 
-  check('a pattern outside the head window is inconclusive, not a failure', () => {
-    const result = runProbe({ kind: 'file-contains', target: 'big.txt', pattern: 'NEEDLE' }, dir)
+  await check('a pattern outside the head window is inconclusive, not a failure', async () => {
+    const result = await runProbe({ kind: 'file-contains', target: 'big.txt', pattern: 'NEEDLE' }, dir)
     assert.equal(result.status, 'inconclusive')
     assert.match(result.detail, /not seen/)
   })
 
-  check('a pattern in the tail window is found', () => {
-    const result = runProbe({ kind: 'file-contains', target: 'tail.txt', pattern: 'NEEDLE' }, dir)
+  await check('a pattern in the tail window is found', async () => {
+    const result = await runProbe({ kind: 'file-contains', target: 'tail.txt', pattern: 'NEEDLE' }, dir)
     assert.equal(result.status, 'pass')
   })
 
-  check('a small file that lost the pattern still fails', () => {
-    assert.equal(runProbe({ kind: 'file-contains', target: 'small.txt', pattern: 'NEEDLE' }, dir).status, 'fail')
-    assert.equal(runProbe({ kind: 'path-exists', target: 'missing.txt' }, dir).status, 'fail')
+  await check('a small file that lost the pattern still fails', async () => {
+    assert.equal((await runProbe({ kind: 'file-contains', target: 'small.txt', pattern: 'NEEDLE' }, dir)).status, 'fail')
+    assert.equal((await runProbe({ kind: 'path-exists', target: 'missing.txt' }, dir)).status, 'fail')
   })
 
   const { store } = makeStore()
@@ -563,7 +563,7 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     origin: 'test',
     probe: { kind: 'file-contains', target: 'big.txt', pattern: 'NEEDLE' },
   })
-  const recalled = store.recall({ query: 'big fixture file contains the needle marker', cwd: dir, probeTtlMs: 0 })
+  const recalled = await store.recall({ query: 'big fixture file contains the needle marker', cwd: dir, probeTtlMs: 0 })
   check('an inconclusive probe keeps serving the record and advances its check clock', () => {
     assert.equal(recalled.items.length, 1)
     assert.equal(recalled.probeInconclusive, 1)
@@ -800,7 +800,7 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     origin: 'test',
   })
 
-  const autoPublic = store.recall({
+  const autoPublic = await store.recall({
     query: 'personal photos and private messages',
     gatePrivate: true,
     visibility: 'public',
@@ -811,7 +811,7 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.equal(autoPublic.gatedPrivate, 1)
   })
 
-  const explicit = store.recall({
+  const explicit = await store.recall({
     query: 'personal photos and private messages',
     gatePrivate: false,
     probeOnRecall: false,
@@ -821,7 +821,7 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.match(explicit.items[0].line, / private /)
   })
 
-  const autoPrivate = store.recall({
+  const autoPrivate = await store.recall({
     query: 'personal photos and private messages',
     gatePrivate: true,
     visibility: 'private',
@@ -868,7 +868,7 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     claim: 'He prefers a quiet room when working late.',
     origin: 'test',
   })
-  const gated = store.recall({
+  const gated = await store.recall({
     query: 'prefers a quiet room when working late',
     gatePrivate: true,
     visibility: 'public',
@@ -887,7 +887,7 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     sensitivity: 'public',
     origin: 'test',
   })
-  const reviewed = store.recall({
+  const reviewed = await store.recall({
     query: 'prefers a quiet room when working late',
     gatePrivate: true,
     visibility: 'public',
@@ -970,11 +970,11 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.equal(scopes.size, 2)
   })
 
-  check('a missing or malformed prefs file is a no-op', () => {
-    assert.equal(readQqbotSessionScopes(join(root, 'no-such-prefs.json')).size, 0)
+  await check('a missing or malformed prefs file is a no-op', async () => {
+    assert.equal((await readQqbotSessionScopes(join(root, 'no-such-prefs.json'))).size, 0)
     const broken = join(root, 'broken-prefs.json')
     writeFileSync(broken, '{ not json')
-    assert.equal(readQqbotSessionScopes(broken).size, 0)
+    assert.equal((await readQqbotSessionScopes(broken)).size, 0)
   })
 
   check('applying the map declares only the sessions it knows', () => {
@@ -993,15 +993,15 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.equal(qqbotScopeOfSessionKey(''), undefined)
   })
 
-  check('the bridge re-reads only when the preference file changes', () => {
+  await check('the bridge re-reads only when the preference file changes', async () => {
     const path = join(root, 'bridge-stamp.json')
-    assert.equal(bridgeStamp(path), 'missing')
+    assert.equal(await bridgeStamp(path), 'missing')
     writeFileSync(path, '{"sessionIds":{}}')
-    const first = bridgeStamp(path)
+    const first = await bridgeStamp(path)
     assert.notEqual(first, 'missing')
-    assert.equal(bridgeStamp(path), first)
+    assert.equal(await bridgeStamp(path), first)
     writeFileSync(path, '{"sessionIds":{"qqbot:1:c2c:x":"session-1"}}')
-    assert.notEqual(bridgeStamp(path), first)
+    assert.notEqual(await bridgeStamp(path), first)
   })
 }
 
@@ -1080,7 +1080,7 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     origin: 'test',
   })
 
-  const result = store.recall({
+  const result = await store.recall({
     query: 'alpha release checklist',
     cwd: projectA,
     sessionId: 'reject-session',
@@ -1206,6 +1206,63 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
   })
 }
 
+// ------------------------------------------- import trust boundary and ids
+
+{
+  const { store, domain } = makeStore()
+  const base = {
+    type: 'memory',
+    format: 1,
+    id: 'mem_import_guard',
+    dedupeKey: 'project:fact:import guard',
+    owner: 'project:C:/fixture',
+    scope: 'project',
+    kind: 'fact',
+    trigger: 'the import guard fixture',
+    claim: 'An imported row must carry a plausible timestamp to be accepted.',
+    confidence: 0.5,
+    status: 'active',
+    createdAt: 1_700_000_000_000,
+    updatedAt: 1_700_000_000_000,
+  }
+
+  const future = await store.importRows([{ ...base, updatedAt: Date.now() + 2 * 86_400_000 }])
+  check('import rejects a row stamped far in the future', () => {
+    assert.equal(future.rejected, 1)
+    assert.equal(store.list({ limit: 10 }).length, 0)
+  })
+
+  const undated = await store.importRows([{ ...base, updatedAt: undefined }])
+  check('import rejects a row without a usable timestamp', () => {
+    assert.equal(undated.rejected, 1)
+    assert.equal(store.list({ limit: 10 }).length, 0)
+  })
+
+  const accepted = await store.importRows([base])
+  check('a plausibly dated row still imports', () => {
+    assert.equal(accepted.inserted, 1)
+  })
+
+  check('resolveId accepts an exact id, a short id, and passes an unknown one through', () => {
+    assert.equal(store.resolveId(base.id), base.id)
+    assert.equal(store.resolveId(base.id.slice(-6)), base.id)
+    assert.equal(store.resolveId('nope'), 'nope')
+    assert.throws(() => store.resolveId(''), /"id" is required/)
+  })
+
+  await domain.table('memories').put('mem_aaaaaaaa_abc123', {
+    id: 'mem_aaaaaaaa_abc123', status: 'active', scope: 'project', kind: 'fact',
+    trigger: 't', claim: 'c', confidence: 0.5, updatedAt: 1,
+  })
+  await domain.table('memories').put('mem_bbbbbbbb_abc123', {
+    id: 'mem_bbbbbbbb_abc123', status: 'active', scope: 'project', kind: 'fact',
+    trigger: 't', claim: 'c', confidence: 0.5, updatedAt: 1,
+  })
+  check('an ambiguous id suffix is refused instead of guessing', () => {
+    assert.throws(() => store.resolveId('abc123'), /ambiguous/)
+  })
+}
+
 // ---------------------------------------------------------------- config gate
 
 check('recall.enabled: false really disables the recall listener', () => {
@@ -1218,4 +1275,4 @@ check('recall.enabled: false really disables the recall listener', () => {
 })
 
 rmSync(root, { recursive: true, force: true })
-check.report('regression')
+await check.report('regression')

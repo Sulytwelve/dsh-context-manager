@@ -80,7 +80,7 @@ const store = createStore({
   config: { maxRecordChars: 2_000, probeMaxBytes: 262_144 },
 })
 
-const result = store.recall({ query, cwd, budgetTokens: 220, minRelevance: threshold, explain: true })
+const result = await store.recall({ query, cwd, budgetTokens: 220, minRelevance: threshold, explain: true })
 console.log(`query terms: ${result.terms}, considered: ${result.considered}, rejected: ${result.rejected}`)
 for (const row of result.explain ?? []) {
   const record = tables.memories.get(row.id)

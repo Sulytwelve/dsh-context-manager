@@ -82,18 +82,35 @@ export function reopen(domain, config = TEST_CONFIG) {
 /** Tiny assertion runner that keeps every failure instead of stopping at the first. */
 export function createChecker() {
   const results = []
+  const pending = []
+  const record = (label, error) => {
+    if (error === undefined) {
+      results.push(`PASS ${label}`)
+      return
+    }
+    results.push(`FAIL ${label}: ${error?.message ?? error}`)
+    process.exitCode = 1
+  }
+  /**
+   * Run one assertion. A synchronous callback reports immediately; an async
+   * callback returns a promise. `report` waits for every one of them, so a
+   * missing `await` at a call site cannot hide a slow failure.
+   */
   const check = (label, fn) => {
     try {
-      fn()
-      results.push(`PASS ${label}`)
-      return true
+      const value = fn()
+      if (value !== null && typeof value?.then === 'function') {
+        const task = value.then(() => record(label), error => record(label, error))
+        pending.push(task)
+        return task
+      }
+      record(label)
     } catch (error) {
-      results.push(`FAIL ${label}: ${error?.message ?? error}`)
-      process.exitCode = 1
-      return false
+      record(label, error)
     }
   }
-  check.report = title => {
+  check.report = async title => {
+    await Promise.all(pending)
     console.log(results.join('\n'))
     const passed = results.filter(line => line.startsWith('PASS')).length
     console.log(`\n${title}: ${passed}/${results.length} checks passed`)

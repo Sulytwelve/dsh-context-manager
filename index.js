@@ -2,12 +2,12 @@
  * `memory-core` — the hot path of the memory system.
  *
  * Registers one compact model-facing tool, one `agent/pre-step` listener that
- * retrieves prior evidence for a decision, and a per-session ledger. Retrieval
- * is synchronous in-memory scoring with a bounded, deterministic probe; this
- * row never calls a model.
+ * retrieves prior evidence for a decision, and a per-session ledger. Scoring is
+ * in-memory; a due probe does bounded asynchronous file I/O; this row never
+ * calls a model.
  */
 
-import { readFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { checkContract } from './lib/contract.js'
 import { openDomainWithRetry } from './lib/domain-open.js'
 import { DOMAIN_SPEC } from './lib/domain.js'
@@ -79,7 +79,7 @@ const RESUME_INTENT = /(?:\bresume\b|\bcontinue\b|\bcheckpoint\b|pick up|where (
 function stateOf(sessionId) {
   let state = sessionStates.get(sessionId)
   if (state === undefined) {
-    state = { packets: 0, tokens: 0, ids: new Set(), lastTurn: 0 }
+    state = { packets: 0, tokens: 0, ids: new Set() }
     sessionStates.set(sessionId, state)
   }
   return state
@@ -171,16 +171,6 @@ function requireString(args, key) {
   return value
 }
 
-function resolveId(store, raw) {
-  if (typeof raw !== 'string' || raw === '') throw new Error('"id" is required')
-  const direct = store.list({ limit: 100_000 }).find(record => record.id === raw)
-  if (direct !== undefined) return direct.id
-  const matches = store.list({ limit: 100_000 }).filter(record => shortId(record.id) === raw.toLowerCase() || record.id.endsWith(raw))
-  if (matches.length === 1) return matches[0].id
-  if (matches.length > 1) throw new Error(`id "${raw}" is ambiguous; use the full id`)
-  return raw
-}
-
 /**
  * Render the read-only review hint for `status`.
  *
@@ -258,7 +248,7 @@ function memoryTool(ctx, store, config) {
       switch (args.op) {
         case 'recall': {
           const query = String(args.query ?? '')
-          const result = store.recall({
+          const result = await store.recall({
             query,
             cwd,
             sessionId,
@@ -331,18 +321,18 @@ function memoryTool(ctx, store, config) {
           }
         }
         case 'forget': {
-          const id = resolveId(store, args.id)
+          const id = store.resolveId(args.id)
           const record = await store.forget(id, args.query)
           return { ok: true, text: `retired ${record.id} (${record.status})` }
         }
         case 'set_status': {
-          const id = resolveId(store, args.id)
+          const id = store.resolveId(args.id)
           const record = await store.setStatus(id, requireString(args, 'status'))
           return { ok: true, text: `${record.id} is now ${record.status}` }
         }
         case 'set_confidence': {
-          const id = resolveId(store, args.id)
-          const before = store.list({ limit: 100_000 }).find(item => item.id === id)
+          const id = store.resolveId(args.id)
+          const before = store.get(id)
           const record = await store.setConfidence(id, args.confidence, args.query)
           await store.event(
             'confidence',
@@ -352,10 +342,10 @@ function memoryTool(ctx, store, config) {
           return { ok: true, text: `${record.id} confidence ${record.confidence.toFixed(2)}` }
         }
         case 'probe': {
-          const id = resolveId(store, args.id)
-          const record = store.list({ limit: 100_000 }).find(item => item.id === id)
+          const id = store.resolveId(args.id)
+          const record = store.get(id)
           if (record === undefined) throw new Error(`unknown memory "${args.id}"`)
-          const result = runProbe(record.probe, record.cwd ?? cwd, config.probeMaxBytes)
+          const result = await runProbe(record.probe, record.cwd ?? cwd, config.probeMaxBytes)
           await store.markProbe(id, result.status, result.detail)
           return {
             ok: result.status !== 'fail',
@@ -363,7 +353,7 @@ function memoryTool(ctx, store, config) {
           }
         }
         case 'feedback': {
-          const id = resolveId(store, args.id)
+          const id = store.resolveId(args.id)
           const record = await store.feedback(id, args.useful !== false)
           return { ok: true, text: `${record.id} feedback recorded (wins ${record.wins}, harms ${record.harms})` }
         }
@@ -481,7 +471,7 @@ function memoryTool(ctx, store, config) {
           let text = inline
           if (text === undefined) {
             try {
-              text = readFileSync(fromPath, 'utf8')
+              text = await readFile(fromPath, 'utf8')
             } catch (error) {
               throw new Error(`cannot read import file "${fromPath}": ${String(error?.message ?? error)}`)
             }
@@ -548,9 +538,9 @@ function renderCheckpoint(record, fieldLimit = 160) {
  * Exported for the store-level tests: the packet is the unit that decides what
  * the model actually pays for, so it is worth testing without a Host.
  */
-export function buildPacket(store, options) {
+export async function buildPacket(store, options) {
   const { recall, cwd, excludeIds, includeResume, sessionId } = options
-  const result = store.recall({
+  const result = await store.recall({
     query: options.query,
     cwd,
     sessionId,
@@ -585,7 +575,8 @@ export function buildPacket(store, options) {
       const query = String(options.query ?? '')
       // An explicit "where did I leave off" must not depend on lexical overlap
       // with the checkpoint's own words: "what was the last checkpoint here"
-      // shares nothing with a milestone like "memory 1.1.0 trial".
+      // shares nothing with a milestone like "memory 1.1.0 trial". 0.08 is a
+      // floor that tolerates a short shared phrase, not a relevance bar.
       const relevant = query.trim() === ''
         || RESUME_INTENT.test(query)
         || similarity(query, checkpointText) >= 0.08
@@ -649,20 +640,25 @@ function registerRecall(ctx, store, config) {
   const bridgeEnabled = recall.visibilityBridge !== false
   const bridgePath = recall.visibilityBridgePath ?? qqbotPrefsPath()
   let lastBridgeStamp
-  const refreshBridge = () => {
+  const refreshBridge = async () => {
     if (!bridgeEnabled) return
-    const stamp = bridgeStamp(bridgePath)
-    if (stamp === lastBridgeStamp) return
-    lastBridgeStamp = stamp
-    const applied = applySessionScopes(store, readQqbotSessionScopes(bridgePath))
-    if (applied > 0) store.log('debug', `visibility bridge: ${applied} session mapping(s) from ${bridgePath}`)
+    try {
+      const stamp = await bridgeStamp(bridgePath)
+      if (stamp === lastBridgeStamp) return
+      lastBridgeStamp = stamp
+      const applied = applySessionScopes(store, await readQqbotSessionScopes(bridgePath))
+      if (applied > 0) store.log('debug', `visibility bridge: ${applied} session mapping(s) from ${bridgePath}`)
+    } catch (error) {
+      // A foreign file must never break a step; the bridge is best-effort.
+      store.log('debug', `visibility bridge refresh failed: ${String(error?.message ?? error)}`)
+    }
   }
   ctx.on('agent/pre-step', async (payload, next) => {
     const decision = await next()
     if (decision.kind === 'reject' || payload.signal?.aborted) return decision
     const started = nowMs()
     const sessionId = sessionIdOf(payload.agent)
-    refreshBridge()
+    await refreshBridge()
     try {
       const header = payload.agent.session?.header
       const isSubagent = header?.origin === 'subagent'
@@ -677,7 +673,7 @@ function registerRecall(ctx, store, config) {
       if (claimed === '' && state.packets > 0) return decision
 
       const cwd = cwdOf(ctx, payload.agent)
-      const packet = buildPacket(store, {
+      const packet = await buildPacket(store, {
         query: claimed,
         cwd,
         excludeIds: state.ids,
@@ -707,7 +703,6 @@ function registerRecall(ctx, store, config) {
       const message = contextMessage(packet.text, 'memory-recall')
       state.packets += 1
       state.tokens += packet.tokens
-      state.lastTurn = payload.turn
       for (const item of packet.items) state.ids.add(item.record.id)
 
       store.bump(sessionId, {
@@ -818,7 +813,7 @@ export async function apply(ctx, rawConfig) {
 
   if (config.recall.visibilityBridge !== false) {
     const bridgePath = config.recall.visibilityBridgePath ?? qqbotPrefsPath()
-    const applied = applySessionScopes(store, readQqbotSessionScopes(bridgePath))
+    const applied = applySessionScopes(store, await readQqbotSessionScopes(bridgePath))
     if (applied > 0) {
       ctx.logger?.info?.(`[context-manager] visibility bridge: ${applied} QQ session(s) from ${bridgePath}`)
     }

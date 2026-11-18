@@ -82,7 +82,7 @@ export function apply(ctx, rawConfig) {
             break
           }
         }
-        const result = runProbe(record.probe, record.cwd, config.maxBytes)
+        const result = await runProbe(record.probe, record.cwd, config.maxBytes)
         checked += 1
         if (result.status === 'fail') {
           failed += 1

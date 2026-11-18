@@ -41,13 +41,16 @@ the unchanged `agent_memory` domain, so nothing is lost.
 | Row id | Module | Model calls | Cost |
 |---|---|---|---|
 | `memory-core` | `@sulytwelve/dsh-context-manager` | none | One scoring pass per turn start; a few small file writes |
-| `memory-distill` | `…/distill` | 0–2 per qualifying turn, **enabled by default** | One bounded background request, after the turn already closed |
+| `memory-distill` | `…/distill` | 0–2 per qualifying turn, **on in the shipped bundle patch** | One bounded background request, after the turn already closed |
 | `memory-probe` | `…/probe` | none | A periodic `stat` / substring check of at most 40 records |
 
 `memory-distill` ships enabled because a memory system that never learns
 anything new is only half a system; set `llm.enabled: false` in its config to
-make the whole bundle model-call-free. Turning `memory-core` off makes the other
-two inactive (they inject its store service) and stops all injection.
+make the whole bundle model-call-free. That default lives in the shipped
+`cordis.patch.yml`; the module's own fallback keeps the model call off, so a row
+mounted without the patch never spends a request. Turning `memory-core` off
+makes the other two inactive (they inject its store service) and stops all
+injection.
 
 ## Install
 
@@ -251,9 +254,15 @@ conversation — otherwise it is the public subset.
 records by owner + `dedupeKey`. A newer `updatedAt` wins; an older or equal row is
 skipped, so importing an unchanged export twice changes nothing. Import never
 demotes local state: confidence keeps the higher value and status keeps the
-stronger one. Wrong `format`, or a row missing id/dedupeKey/trigger/claim, is
-rejected rather than partially applied; damaged JSONL lines are reported by line
-number. Export → import → export round-trips identically.
+stronger one. A row with a missing `updatedAt`, or one more than a day in the
+future, is rejected: it would win the newer-wins comparison forever and no later
+import could correct it. Wrong `format`, or a row missing id/dedupeKey/trigger/
+claim, is rejected rather than partially applied; damaged JSONL lines are reported
+by line number. Export → import → export round-trips identically.
+
+Import is a write-class capability: the same caller can already call `write`, so
+treat an imported file as untrusted input. Confidence still only falls by an
+explicit `set_confidence` or a `write` with `demote: true`.
 
 `report` ends with the last recall's rejection summary — reason counts
 (no-overlap, below-threshold, private, probe-failed, probe-budget, token-budget,
@@ -377,6 +386,12 @@ Every row reads its `config` from the patch layer. The defaults live in
     recheckMs: 3600000       # minimum age before a record is re-checked
 ```
 
+Two layers set these values. The shipped bundle patch is authoritative for an
+installed bundle: `llm.enabled: true`, `threshold: 4`. The module's own fallbacks
+— used only when a row is mounted without that patch — keep the model call off
+(`enabled: false`, `threshold: 3`), so a bare row cannot spend a request by
+accident. The table and examples above describe the bundle.
+
 Run `memory{op:"status"}` after a day and read `probeSkipped`: a non-zero value
 means the five-probe recall budget is binding, not that the checks failed.
 
@@ -420,7 +435,11 @@ control design, the invalid runs, and the caveats.
 - Retrieval is lexical. A record whose vocabulary does not overlap the user's
   wording will not surface; write triggers in the words you would use to ask.
 - Recall itself does no I/O **unless a probe is due**; a due probe reads the
-  target file, bounded by `probeMaxBytes`.
+  target file asynchronously, bounded by `probeMaxBytes`, so a slow network
+  filesystem delays that recall but does not block other sessions.
+- Packet sizes are estimated at 3.6 non-CJK characters per token (CJK glyphs are
+  one each), deliberately below the Host's 4-character heuristic. The 220-token
+  budget is a conservative ceiling, not an exact prediction.
 - A probe expresses only the checks the recorder declared. Records without a
   probe are never invalidated automatically.
 - Distillation is a single non-tool request; it cannot read files. It may only
@@ -435,12 +454,16 @@ control design, the invalid runs, and the caveats.
 
 ```bash
 node test/smoke.mjs        # 18 store-level checks, no DSH required
-node test/regression.mjs   # 77 isolation / probe / evidence / privacy / import checks
+node test/regression.mjs   # 82 isolation / probe / evidence / privacy / import checks
 node bench/setup.mjs       # build the benchmark fixture
 node bench/analyze.mjs <session.v4.jsonl.zstd>   # per-session calls/tokens/wall
 node bench/score.mjs "$DSH_HOME/storages/agent_memory" "<query>" --cwd <dir>
 node bench/packet.mjs "$DSH_HOME/storages/agent_memory" "<query>" --cwd <dir>
 ```
+
+GitHub Actions runs the two test suites on every push and pull request
+(`.github/workflows/test.yml`, Node 20 and 22), so the counts above are checked
+rather than remembered.
 
 `bench/score.mjs` prints every candidate's trigger-coverage breakdown against the
 real records in a live store — use it to tune `minRelevance` for your vocabulary.

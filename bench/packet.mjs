@@ -80,7 +80,7 @@ const store = createStore({
   config: { maxRecordChars: 2_000, probeMaxBytes: 262_144 },
 })
 
-const packet = buildPacket(store, {
+const packet = await buildPacket(store, {
   query,
   cwd: flag('--cwd'),
   sessionId: flag('--session'),

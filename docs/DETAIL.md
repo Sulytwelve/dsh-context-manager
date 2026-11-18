@@ -70,10 +70,12 @@ feedback counters weight the result.
 Candidates due for a check — never checked, or checked longer ago than
 `recall.probeTtlMs`, where `0` means every recall — are probed before they can
 enter the packet. The probe budget is five per recall; a candidate still due
-when the budget runs out is **skipped**, not served unverified. The survivors are
-packed into a token budget (220 tokens by default) and appended as one synthetic
-`recall`-form user message, so the packet is durable, attributable, and visible
-in the transcript. A verbose record is truncated to fit rather than dropped.
+when the budget runs out is **skipped**, not served unverified. Probe reads are
+asynchronous (`node:fs/promises`), so a check on a slow filesystem does not block
+the Host event loop. The survivors are packed into a token budget (220 tokens by
+default) and appended as one synthetic `recall`-form user message, so the packet
+is durable, attributable, and visible in the transcript. A verbose record is
+truncated to fit rather than dropped.
 
 A probe is three-valued: `pass`, `fail`, or `inconclusive`. Only `fail` retires
 a record. `inconclusive` covers the cases where the check could not see the
@@ -243,9 +245,17 @@ silently pick a different winner. The rules:
 - a row with the wrong `format`, or missing `id`, `dedupeKey`, `trigger`, or
   `claim`, is rejected whole, never partially applied; damaged JSONL lines are
   skipped and reported by line number;
+- a row whose `updatedAt` is missing or more than a day in the future is
+  rejected: it would always win the newer-wins comparison and no later import
+  could correct it. A day of clock skew is tolerated;
 - on insert the original `id`, `dedupeKey`, timestamps, counters, provenance,
   and supersession links are preserved, so `export → import → export` is
   identical.
+
+Import is a write-class capability, not a lower trust boundary: the same caller
+can already call `write`, but a row also carries timestamps and counters, so an
+imported JSONL file must be treated as untrusted input. Confidence still only
+falls by an explicit `set_confidence` or a `write` with `demote: true`.
 
 `report` appends the last recall's rejection summary for the calling session:
 counts per reason (`no-overlap`, `below-threshold`, `private`, `probe-failed`,
@@ -290,8 +300,8 @@ storage error; the next reload retries.
   the user's wording will not surface; write triggers in the words you would use
   to ask for it.
 - Recall is free of I/O only while no probe is due; a due probe reads up to
-  `probeMaxBytes` from the head plus 64 KiB from the tail. Five probes per recall
-  and 40 per sweep are hard caps.
+  `probeMaxBytes` from the head plus 64 KiB from the tail, asynchronously. Five
+  probes per recall and 40 per sweep are hard caps.
 - A probe only expresses the checks the recorder declared. Records without a
   probe are never automatically invalidated.
 - Distillation is a single non-tool model call; it cannot read files. Its output

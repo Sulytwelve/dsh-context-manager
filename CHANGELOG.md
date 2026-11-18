@@ -3,17 +3,32 @@
 All notable changes to `@sulytwelve/dsh-context-manager` (formerly
 `@sulytwelve/dsh-memory-astra62`). Versions are Git tags; the tag is the release.
 
-## 1.4.1
+## 1.6.0
 
-- Docs: a complete backup requires a private conversation (a public export
-  reports `privateOmitted` and leaves those rows out); the import revival edge is
-  spelled out — the status strength order (`active` > `proposed` > `stale` >
-  `superseded`) is part of the import contract, so a newer row from a machine
-  that never probed can revive a local `stale`/`superseded` record to `active`,
-  and the duplicate then surfaces in the review hint; the QQ bridge is a
-  snapshot read at start and on each new session's first step, not a live
-  watcher. Two regression cases pin the ladder (a newer active row revives a
-  superseded record; a newer proposed row reopens a stale one as proposed).
+- **Probe I/O is asynchronous.** `runProbe` now uses `node:fs/promises`; the
+  recall path, the explicit `probe` op, and the background sweep all await a
+  bounded read instead of blocking the Host event loop for up to 320 KiB per
+  check. The QQ bridge's change stamp and prefs read are asynchronous too. The
+  three-valued semantics are unchanged; one edge is more honest: a
+  `path-exists` target that exists but cannot be read is `inconclusive`, not a
+  false `fail`. The import file read is asynchronous as well.
+- **Import is bounded by the clock.** A row whose `updatedAt` is missing or more
+  than a day in the future is rejected: such a row would win the "newer wins"
+  comparison forever, and no later import could correct it. A day of clock skew
+  is tolerated, and plausibly dated rows still round-trip unchanged.
+- **`resolveId` is one pass.** Record lookup by full id or unambiguous suffix no
+  longer sorts the whole table up to three times; the store resolves it from the
+  table keys, and the tool reads the follow-up record with `get`.
+- **Docs match the code.** The README now says which layer owns each default:
+  the shipped bundle patch (`llm.enabled: true`, `threshold: 4`) versus the
+  module fallback (`false`, `3`) that applies only to a bare row.
+- Housekeeping: removed the dead `state.lastTurn` field and the unused
+  `sampleOf`; the per-turn sample map is bounded and dropped on
+  `agent/disposed`; the resume-overlap (0.08), restatement (0.35), and scoring
+  weights are documented at their call sites; the 3.6-chars/token estimator
+  margin over the Host's 4-char heuristic is explained.
+- CI: a GitHub Actions workflow runs `node test/smoke.mjs` and
+  `node test/regression.mjs` on Node 20 and 22. Regression is now 82 checks.
 
 ## 1.5.0
 
@@ -27,6 +42,18 @@ All notable changes to `@sulytwelve/dsh-context-manager` (formerly
   that calls `memoryVisibility` after a session is created, resumed, or re-forked
   — the durable replacement for the bridge. `integrations/README.md` documents
   applying it. Once it lands, the bridge can be deleted.
+
+## 1.4.1
+
+- Docs: a complete backup requires a private conversation (a public export
+  reports `privateOmitted` and leaves those rows out); the import revival edge is
+  spelled out — the status strength order (`active` > `proposed` > `stale` >
+  `superseded`) is part of the import contract, so a newer row from a machine
+  that never probed can revive a local `stale`/`superseded` record to `active`,
+  and the duplicate then surfaces in the review hint; the QQ bridge is a
+  snapshot read at start and on each new session's first step, not a live
+  watcher. Two regression cases pin the ladder (a newer active row revives a
+  superseded record; a newer proposed row reopens a stale one as proposed).
 
 ## 1.4.0
 

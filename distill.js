@@ -25,6 +25,10 @@ const DEFAULTS = {
   enabled: true,
   checkpoint: true,
   includeSubagents: true,
+  // Row fallbacks only. The shipped bundle patch (cordis.patch.yml) enables the
+  // model call and sets threshold 4; a row mounted without that patch stays
+  // deterministic, because this row must not spend a model request by accident.
+  // README "Configuration" documents both layers.
   llm: {
     enabled: false,
     threshold: 3,
@@ -93,13 +97,16 @@ function emptySample(sessionId, turn) {
   }
 }
 
-function sampleOf(sessionId, turn) {
-  let sample = samples.get(sessionId)
-  if (sample === undefined || sample.turn !== turn) {
-    sample = emptySample(sessionId, turn)
-    samples.set(sessionId, sample)
+/** Sessions whose turn never ends (aborted process, disposed agent) must not leak. */
+const MAX_SAMPLES = 128
+
+function rememberSample(sessionId, sample) {
+  if (samples.size >= MAX_SAMPLES && !samples.has(sessionId)) {
+    // Map preserves insertion order; drop the oldest turn still in flight.
+    const oldest = samples.keys().next().value
+    if (oldest !== undefined) samples.delete(oldest)
   }
-  return sample
+  samples.set(sessionId, sample)
 }
 
 function noteError(sample, name, code, reason) {
@@ -452,6 +459,13 @@ export async function apply(ctx, rawConfig) {
     budgets.bySession.clear()
   })
 
+  // A session can end without a `turn/end` (disposed agent, aborted process);
+  // drop its half-built sample so the map does not accumulate one per session.
+  ctx.on('agent/disposed', ({ agent }) => {
+    const sessionId = agent?.id ?? agent?.session?.id
+    if (typeof sessionId === 'string' && sessionId !== '') samples.delete(sessionId)
+  })
+
   ctx.on('session/event', (session, event) => {
     try {
       const sessionId = session?.id
@@ -463,7 +477,7 @@ export async function apply(ctx, rawConfig) {
         const sample = emptySample(sessionId, event.data.turn)
         sample.cwd = cwdOfSession(ctx, session)
         sample.origin = isSubagent ? 'subagent' : 'root'
-        samples.set(sessionId, sample)
+        rememberSample(sessionId, sample)
         return
       }
 
