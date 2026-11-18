@@ -3,6 +3,23 @@
 All notable changes to `@sulytwelve/dsh-context-manager` (formerly
 `@sulytwelve/dsh-memory-astra62`). Versions are Git tags; the tag is the release.
 
+## 1.4.1
+
+- Docs: a complete backup requires a private conversation (a public export
+  reports `privateOmitted` and leaves those rows out); the import revival edge is
+  spelled out — the status strength order (`active` > `proposed` > `stale` >
+  `superseded`) is part of the import contract, so a newer row from a machine
+  that never probed can revive a local `stale`/`superseded` record to `active`,
+  and the duplicate then surfaces in the review hint; the QQ bridge is a
+  snapshot read at start and on each new session's first step, not a live
+  watcher. Two regression cases pin the ladder (a newer active row revives a
+  superseded record; a newer proposed row reopens a stale one as proposed).
+
+## 1.5 (planned)
+
+- Retire the QQ bridge: the transport calls `memoryVisibility` directly. Until
+  then the bridge stays opt-in and is documented as best-effort.
+
 ## 1.4.0
 
 - **Import.** `memory{op:"import"}` reads export JSONL from `path` or inline

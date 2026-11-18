@@ -192,9 +192,13 @@ For `@tencent-connect/dsh-qqbot`, the scope is known internally
 session ids are random (`session-<uuid>`), so it cannot be read from the session
 id. The plugin does persist the mapping in `~/.dsh-qqbot/model-prefs.json`
 (`sessionIds: { "qqbot:<appId>:c2c:<peer>": "session-…" }`), and this plugin can
-read it once per new session — `recall.visibilityBridge: true` opts in; it is
-off by default because it reads another plugin's data file. The durable fix
-belongs in the transport — one call after the session is created or resumed:
+read it — `recall.visibilityBridge: true` opts in; it is off by default because
+it reads another plugin's data file. The bridge is a snapshot read at start and
+again on each **new session's first step**, so a QQ session created after boot is
+mapped before its first recall (no restart needed); it is not a live watcher, so
+a change inside an already-running session is not re-read. That limitation is why
+the durable fix belongs in the transport — one call after the session is created
+or resumed:
 
 ```js
 agent.ctx.get?.('memoryVisibility')?.set(sessionId, scope === 'c2c' ? 'private' : 'public')
@@ -214,6 +218,12 @@ unchanged store differ only in `generatedAt`. Filters are `owner`, `scope`,
 `status`, `limit` (default 100, capped at 500), and `offset`. The ledger and
 event tables are intentionally excluded: they are local telemetry, not memory.
 
+**A complete backup needs a private conversation.** A public-session export
+omits private records and reports only `privateOmitted` in the header, which is
+correct for sharing but wrong for a backup. Before exporting a full copy, either
+declare the session in `recall.privateSessions` (or via `memoryVisibility`) and
+run the export there, or accept that the export is the public subset.
+
 Import maps rows back by `owner + dedupeKey`, **not** by claim similarity: a
 `write` re-derivation would merge two records that carry different ids and can
 silently pick a different winner. The rules:
@@ -223,6 +233,14 @@ silently pick a different winner. The rules:
 - an import never demotes: `confidence` keeps the higher value and `status` the
   stronger one (`active` > `proposed` > `stale` > `superseded`), so importing an
   old export cannot un-verify or un-retire anything;
+- the strength order is part of the import contract, not just an internal
+  ranking: a newer row can move a record **up** that ladder (for example a
+  `proposed` row can reopen a `stale` record for review), and a row from a
+  machine that never probed can therefore revive a local `stale` or
+  `superseded` record to `active`. That direction is intentional — a newer
+  observation wins, an older one cannot un-retire — but when the revived record
+  shares a trigger with one that stayed active, `status` reports the group via
+  the review hint so the two can be reconciled.
 - a row with the wrong `format`, or missing `id`, `dedupeKey`, `trigger`, or
   `claim`, is rejected whole, never partially applied; damaged JSONL lines are
   skipped and reported by line number;

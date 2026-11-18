@@ -1157,6 +1157,42 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.equal(rejected.rejected, 3)
     assert.equal(rejected.inserted, 0)
   })
+
+  const ladder = makeStore().store
+  const retired = await ladder.write({
+    scope: 'project',
+    kind: 'fact',
+    trigger: 'the retired deployment note',
+    claim: 'The deployment note was retired after the migration.',
+    cwd: projectA,
+    origin: 'test',
+  })
+  await ladder.setStatus(retired.record.id, 'superseded')
+  const retiredRow = ladder.exportRecords({}).rows
+    .map(record => ladder.exportRow(record))
+    .find(row => row.id === retired.record.id)
+  await ladder.importRows([{ ...retiredRow, status: 'active', updatedAt: retiredRow.updatedAt + 1_000 }])
+  check('a newer active row revives a superseded record', () => {
+    assert.equal(ladder.list({ status: 'active' }).some(record => record.id === retired.record.id), true)
+  })
+
+  const failed = await ladder.write({
+    scope: 'project',
+    kind: 'fact',
+    trigger: 'the stale probe note',
+    claim: 'The stale probe note is checked against a marker file.',
+    cwd: projectA,
+    origin: 'test',
+  })
+  await ladder.markProbe(failed.record.id, 'fail', 'marker missing')
+  const staleRow = ladder.exportRecords({}).rows
+    .map(record => ladder.exportRow(record))
+    .find(row => row.id === failed.record.id)
+  await ladder.importRows([{ ...staleRow, status: 'proposed', updatedAt: staleRow.updatedAt + 1_000 }])
+  check('a newer proposed row reopens a stale record for review, not to active', () => {
+    const current = ladder.list({ limit: 20 }).find(record => record.id === failed.record.id)
+    assert.equal(current.status, 'proposed')
+  })
 }
 
 // ---------------------------------------------------------------- config gate

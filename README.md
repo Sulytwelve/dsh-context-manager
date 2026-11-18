@@ -243,6 +243,9 @@ owner, dedupe key, and id so two exports of an unchanged store are identical
 apart from timestamps. It is read-only and paginated (`owner`, `scope`, `status`,
 `limit`, `offset`, default page of 100). Each record line carries its `id` and
 `dedupeKey`; ledger and event rows are local telemetry and are not exported.
+A public-session export omits private records (the header reports
+`privateOmitted`), so a **complete** backup has to run from a declared private
+conversation — otherwise it is the public subset.
 
 `import` reads that JSONL back (`path` or inline `payload`) and maps rows to
 records by owner + `dedupeKey`. A newer `updatedAt` wins; an older or equal row is
@@ -429,7 +432,7 @@ control design, the invalid runs, and the caveats.
 
 ```bash
 node test/smoke.mjs        # 18 store-level checks, no DSH required
-node test/regression.mjs   # 74 isolation / probe / evidence / privacy / import checks
+node test/regression.mjs   # 76 isolation / probe / evidence / privacy / import checks
 node bench/setup.mjs       # build the benchmark fixture
 node bench/analyze.mjs <session.v4.jsonl.zstd>   # per-session calls/tokens/wall
 node bench/score.mjs "$DSH_HOME/storages/agent_memory" "<query>" --cwd <dir>
