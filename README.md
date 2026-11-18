@@ -412,7 +412,7 @@ control design, the invalid runs, and the caveats.
 
 ```bash
 node test/smoke.mjs        # 18 store-level checks, no DSH required
-node test/regression.mjs   # 64 isolation / probe / evidence / privacy regression checks
+node test/regression.mjs   # 67 isolation / probe / evidence / privacy regression checks
 node bench/setup.mjs       # build the benchmark fixture
 node bench/analyze.mjs <session.v4.jsonl.zstd>   # per-session calls/tokens/wall
 node bench/score.mjs "$DSH_HOME/storages/agent_memory" "<query>" --cwd <dir>

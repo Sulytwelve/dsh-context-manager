@@ -8,6 +8,7 @@
  */
 
 import { checkContract } from './lib/contract.js'
+import { openDomainWithRetry } from './lib/domain-open.js'
 import { DOMAIN_SPEC } from './lib/domain.js'
 import { applySessionScopes, qqbotPrefsPath, readQqbotSessionScopes } from './lib/visibility-bridge.js'
 import { EXPORT_FORMAT, createStore, isPrivateRecord, shortId } from './lib/store.js'
@@ -694,13 +695,24 @@ export async function apply(ctx, rawConfig) {
   })
   if (!compatible) return
 
-  const domain = await ctx.storageDomain.open(DOMAIN_SPEC)
+  let domain
+  try {
+    domain = await openDomainWithRetry(ctx.storageDomain, DOMAIN_SPEC)
+  } catch (error) {
+    // The usual cause is a config-edit reload landing while the previous fiber
+    // still holds the domain. Say so once and let the next reload retry,
+    // instead of failing the whole row with a raw storage error.
+    ctx.logger?.error?.(
+      `[context-manager] memory-core degraded: could not open storage domain '${DOMAIN_SPEC.name}' `
+      + `(${String(error?.message ?? error)}); reload the row to retry`,
+    )
+    return
+  }
   const store = createStore({ domain, config, logger: ctx.logger })
 
-  ctx.effect(() => () => {
-    void store.close().catch(() => {})
-    void domain.close().catch(() => {})
-  })
+  // Return the close promises: the reload must not apply the new instance until
+  // the previous handle is released, otherwise the new open loses the race.
+  ctx.effect(() => () => Promise.allSettled([store.close(), domain.close()]))
 
   if (typeof ctx.provide === 'function') {
     ctx.provide('memoryStore', store)

@@ -15,6 +15,7 @@ import { join } from 'node:path'
 import { summarizeDistillLedger } from '../lib/budget.js'
 import { evaluateCheckpointGuard } from '../lib/checkpoint-guard.js'
 import { checkContract } from '../lib/contract.js'
+import { openDomainWithRetry } from '../lib/domain-open.js'
 import { applySessionScopes, qqbotScopeOfSessionKey, qqbotSessionScopes, readQqbotSessionScopes } from '../lib/visibility-bridge.js'
 import { normalizeCwdOn, runProbe, safeKey, normalizeCwd } from '../lib/util.js'
 import { ownerFor } from '../lib/store.js'
@@ -990,6 +991,52 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.equal(qqbotScopeOfSessionKey('qqbot:9:channel:x'), undefined)
     assert.equal(qqbotScopeOfSessionKey(undefined), undefined)
     assert.equal(qqbotScopeOfSessionKey(''), undefined)
+  })
+}
+
+// ------------------------------------------------ hot-reload domain opening
+
+{
+  const spec = { name: 'agent_memory' }
+  const retryable = new Error("already-open: domain 'agent_memory' is already open")
+  let attempts = 0
+  const facility = {
+    async open() {
+      attempts += 1
+      if (attempts < 3) throw retryable
+      return { name: 'agent_memory' }
+    },
+  }
+  const opened = await openDomainWithRetry(facility, spec, { timeoutMs: 500, delayMs: 5 })
+  check('a reload that loses the domain race retries until the old handle closes', () => {
+    assert.equal(attempts, 3)
+    assert.equal(opened.name, 'agent_memory')
+  })
+
+  let failures = 0
+  const forever = { async open() { failures += 1; throw retryable } }
+  let conflict
+  try {
+    await openDomainWithRetry(forever, spec, { timeoutMs: 30, delayMs: 5 })
+  } catch (error) {
+    conflict = error
+  }
+  check('a permanent domain conflict gives up with the original error', () => {
+    assert.equal(conflict, retryable)
+    assert.ok(failures >= 2)
+  })
+
+  let otherAttempts = 0
+  const other = { async open() { otherAttempts += 1; throw new Error('backend-not-found: no route') } }
+  let nonRetryable
+  try {
+    await openDomainWithRetry(other, spec, { timeoutMs: 500, delayMs: 5 })
+  } catch (error) {
+    nonRetryable = error
+  }
+  check('a non-retryable open failure is reported without retrying', () => {
+    assert.match(String(nonRetryable?.message), /backend-not-found/)
+    assert.equal(otherAttempts, 1)
   })
 }
 

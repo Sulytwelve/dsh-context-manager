@@ -242,6 +242,16 @@ cost, which is what `recall.tokenBudget` bounds. The installed package ships
 `test/`, so `node test/smoke.mjs` and `node test/regression.mjs` can be run from
 the installed copy.
 
+## Hot reload
+
+A config edit disposes and re-applies the row, and the domain facility allows one
+live handle per name. The disposer therefore returns `Promise.allSettled([store.close(), domain.close()])`,
+and the replacement opens through `openDomainWithRetry`, which retries only an
+`already-open` rejection, for at most two seconds. If the domain is genuinely
+held elsewhere, the row logs one degraded line (`memory-core degraded: could not
+open storage domain …`) and registers nothing rather than failing with a raw
+storage error; the next reload retries.
+
 ## Limitations
 
 - Retrieval is lexical, not semantic. A record whose vocabulary does not overlap
