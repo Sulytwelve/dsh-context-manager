@@ -8,7 +8,7 @@
  * user's next turn never waits for it.
  */
 
-import { summarizeDistillLedger } from './lib/budget.js'
+import { evaluateDistillBudget, reserveDistillBudget, summarizeDistillLedger } from './lib/budget.js'
 import { evaluateCheckpointGuard } from './lib/checkpoint-guard.js'
 import { checkContract } from './lib/contract.js'
 import { evaluateSupport, renderSupport } from './lib/support.js'
@@ -56,8 +56,11 @@ function normalizeConfig(raw) {
 
 // ---------------------------------------------------------------- samples ----
 
-const samples = new Map()
-const budgets = { day: '', calls: 0, bySession: new Map() }
+/**
+ * Live per-session turn samples. Owned by the mounted row (inside `apply`),
+ * not by the module: two mounted instances must not share or clear each
+ * other's state.
+ */
 
 /**
  * Resolve the session's effective working directory.
@@ -100,7 +103,7 @@ function emptySample(sessionId, turn) {
 /** Sessions whose turn never ends (aborted process, disposed agent) must not leak. */
 const MAX_SAMPLES = 128
 
-function rememberSample(sessionId, sample) {
+function rememberSample(samples, sessionId, sample) {
   if (samples.size >= MAX_SAMPLES && !samples.has(sessionId)) {
     // Map preserves insertion order; drop the oldest turn still in flight.
     const oldest = samples.keys().next().value
@@ -250,24 +253,8 @@ function parseCandidates(text) {
     && typeof item.claim === 'string' && item.claim.trim().length >= 12)
 }
 
-function budgetAllows(store, sessionId, config, isSubagent) {
-  const today = new Date().toISOString().slice(0, 10)
-  if (budgets.day !== today) {
-    budgets.day = today
-    budgets.calls = 0
-  }
-  if (isSubagent && !config.includeSubagents) return false
-  if (budgets.calls >= config.llm.maxCallsPerDay) {
-    store.log('debug', 'distill budget: daily cap reached')
-    return false
-  }
-  const used = budgets.bySession.get(sessionId) ?? 0
-  if (used >= config.llm.maxCallsPerSession) return false
-  return true
-}
-
 /** One bounded model call; returns the number of records written. */
-async function distillWithModel(ctx, store, config, sample, level) {
+async function distillWithModel(ctx, store, config, sample, level, budgets) {
   const llm = ctx.get('llm')
   if (llm === undefined) {
     store.log('debug', 'distill skipped: no llm service')
@@ -293,8 +280,23 @@ async function distillWithModel(ctx, store, config, sample, level) {
     return 0
   }
 
-  budgets.calls += 1
-  budgets.bySession.set(sample.sessionId, (budgets.bySession.get(sample.sessionId) ?? 0) + 1)
+  // Re-check at the reservation point: the caller's check ran before this
+  // async function, and the cooldown may have been armed by another turn.
+  const verdict = evaluateDistillBudget({ budgets, config, sessionId: sample.sessionId, isSubagent: sample.origin === 'subagent' })
+  if (!verdict.allowed) {
+    store.log('debug', `distill skipped: ${verdict.reason}`)
+    return 0
+  }
+  const attemptedAt = Date.now()
+  reserveDistillBudget(budgets, sample.sessionId, attemptedAt)
+  // Persist the reservation before the network request: a crash, a failed
+  // stream, or an aborted turn must still consume the day's allowance.
+  try {
+    await store.recordDistillAttempt(sample.sessionId, attemptedAt)
+  } catch (error) {
+    store.log('warn', `distill reservation could not be persisted: ${String(error?.message ?? error)}`)
+  }
+
   const started = nowMs()
   const prompt = buildPrompt(sample)
   const inputEstimate = estimateTokens(prompt)
@@ -381,6 +383,7 @@ async function distillWithModel(ctx, store, config, sample, level) {
     `${level} call ${elapsed.toFixed(0)}ms, ${inputTokens}/${outputTokens} tok, `
       + `wrote ${written}/${candidates.length} (${promoted} supported by cited observations)`,
     sample.sessionId,
+    { private: store.sessionVisibility(sample.sessionId) === 'private' },
   )
   return written
 }
@@ -394,11 +397,14 @@ async function writeCheckpoint(store, sample) {
   })
   if (guard.action === 'skip') {
     // Do not lose state silently: another session's fresh checkpoint stays, and
-    // the skip is visible in the event ring (and in `status` of that session).
+    // the skip is visible in the event ring. The detail names another session's
+    // id prefix, so it is audience-restricted like the checkpoint itself.
+    const existingPublic = existing?.sensitivity === 'public'
     await store.event(
       'checkpoint-skipped',
       `${guard.reason} (existing session ${String(existing?.sessionId ?? '?').slice(0, 8)}, ${Math.round((guard.ageMs ?? 0) / 60000)}m old)`,
       sample.sessionId,
+      { private: !existingPublic },
     )
     return
   }
@@ -440,13 +446,20 @@ export async function apply(ctx, rawConfig) {
   })
   if (!compatible) return
 
-  // Recover today's spend from the ledger so a restart does not reset the cap.
+  // State belongs to this mounted row, not to the module: two instances must
+  // not share samples, budgets, or a cooldown.
+  const samples = new Map()
+  const budgets = { day: '', calls: 0, bySession: new Map(), lastAt: new Map() }
+
+  // Recover today's reserve and the last attempt from the ledger so a restart
+  // does not reset either the caps or the cooldown.
   const today = new Date().toISOString().slice(0, 10)
   try {
     const recovered = summarizeDistillLedger(store.ledgerRows(), today)
     budgets.day = today
     budgets.calls = recovered.calls
     budgets.bySession = new Map(recovered.bySession)
+    budgets.lastAt = new Map(recovered.lastAt)
     if (recovered.calls > 0) {
       store.log('info', `distill budget recovered from ledger: ${recovered.calls} call(s) today`)
     }
@@ -457,6 +470,7 @@ export async function apply(ctx, rawConfig) {
   ctx.effect(() => () => {
     samples.clear()
     budgets.bySession.clear()
+    budgets.lastAt.clear()
   })
 
   // A session can end without a `turn/end` (disposed agent, aborted process);
@@ -477,7 +491,7 @@ export async function apply(ctx, rawConfig) {
         const sample = emptySample(sessionId, event.data.turn)
         sample.cwd = cwdOfSession(ctx, session)
         sample.origin = isSubagent ? 'subagent' : 'root'
-        rememberSample(sessionId, sample)
+        rememberSample(samples, sessionId, sample)
         return
       }
 
@@ -508,11 +522,18 @@ export async function apply(ctx, rawConfig) {
       // spending a request on it is pure overhead.
       const substantial = sample.tools.length >= 3 || analysis.reasons.includes('durable-intent')
       if (!substantial) return
-      if (!budgetAllows(store, sessionId, config, isSubagent)) return
+      const verdict = evaluateDistillBudget({ budgets, config, sessionId, isSubagent })
+      if (!verdict.allowed) {
+        store.log('debug', `distill skipped: ${verdict.reason}`)
+        return
+      }
 
       const level = analysis.score >= config.llm.deepThreshold ? 'deep' : 'short'
-      void store.event('distill-plan', `${level} (score ${analysis.score}: ${analysis.reasons.join(',')})`, sessionId)
-      void distillWithModel(ctx, store, config, sample, level).catch(error => {
+      const privateSession = store.sessionVisibility(sessionId) === 'private'
+      void store.event('distill-plan', `${level} (score ${analysis.score}: ${analysis.reasons.join(',')})`, sessionId, {
+        private: privateSession,
+      })
+      void distillWithModel(ctx, store, config, sample, level, budgets).catch(error => {
         store.log('warn', `distill failed: ${String(error?.message ?? error)}`)
       })
     } catch (error) {

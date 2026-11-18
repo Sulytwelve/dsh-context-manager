@@ -3,6 +3,46 @@
 All notable changes to `@sulytwelve/dsh-context-manager` (formerly
 `@sulytwelve/dsh-memory-astra62`). Versions are Git tags; the tag is the release.
 
+## 1.6.1
+
+Security and correctness pass from an external review of 1.6.0.
+
+- **Checkpoints persist again.** The task schema did not declare `sensitivity`,
+  so the domain's read-boundary schema parse dropped it and every public
+  checkpoint reopened as "unknown" (withheld); the private checkpoint key also
+  contained `|`, which the JSON backend rejects as an unsafe path segment, so no
+  private checkpoint could be written. Both fixed; the test harness now enforces
+  the backend's key rule and the domain schemas.
+- **Diagnostics follow the audience.** `status` is session-scoped and, outside a
+  private conversation, shows only events explicitly marked public; legacy
+  free-text events are treated as unknown and hidden. Write, probe, inject,
+  distill, and checkpoint-skip events carry their audience. The `gatePrivate`
+  config switch is gone: automatic and explicit recall use one fail-closed rule.
+- **The packet budget is enforced by the estimator.** The resume line was
+  clipped by a Latin-character ratio, so a Chinese checkpoint produced a
+  395-token packet against a 220-token budget. Clipping, the session remainder,
+  and the final body are measured with the same estimator; only rendered records
+  are marked injected.
+- **Owner-scoped management.** `forget`/`set_status`/`set_confidence`/`probe`/
+  `feedback`, `supersedes`, and `export` respect the caller's owner; `export`
+  gains `all: true` for the operator-wide path. Writes from a private
+  conversation default to private.
+- **Import is validated.** Paths resolve against the working directory, size is
+  checked in bytes before reading, ids/owners/scopes/probes are validated, and
+  claim + evidence + probe + support + check time move as one version.
+- **Probe scheduling.** The sweep filters the whole store by due state instead of
+  the 5,000 most recently updated records; a stale record that fails again
+  advances its clock; session-scope probes keep their directory; a late verdict
+  for a replaced probe is ignored.
+- **Distillation accounting.** The cooldown is enforced, the attempt is reserved
+  and persisted before the request, the per-day counter and last-attempt time
+  are recovered from the ledger, and per-row state is created inside `apply`.
+- **Packaging and docs.** The shipped `bench:setup` script is gone (bench is
+  checkout-only); CI runs Node 20/22/24 and re-tests the packed tarball; the
+  README documents install-time cost/defaults, the two backup operations, the
+  export scope, and verified Node/host combinations. New `test/tool.mjs` covers
+  the tool entry; suites are now 18 + 104 + 10 checks.
+
 ## 1.6.0
 
 - **Probe I/O is asynchronous.** `runProbe` now uses `node:fs/promises`; the

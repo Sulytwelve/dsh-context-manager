@@ -9,7 +9,7 @@
  */
 
 import { checkContract } from './lib/contract.js'
-import { selectProbeCandidates } from './lib/probe-plan.js'
+import { isPrivateRecord } from './lib/store.js'
 import { nowMs, oneLine, runProbe } from './lib/util.js'
 
 export const name = 'memory-probe'
@@ -66,9 +66,10 @@ export function apply(ctx, rawConfig) {
     let inconclusive = 0
     try {
       const now = Date.now()
-      // Least-recently-checked first, so a batch of healthy records cannot keep
-      // the sweep away from an older record that has started to fail.
-      const candidates = selectProbeCandidates(store.list({ limit: 5_000 }), {
+      // Filter by due state across the whole store, then take the batch. The
+      // previous form took the 5,000 most recently updated records first, so an
+      // older overdue record could never be swept.
+      const candidates = store.probeCandidates({
         now,
         recheckMs: config.recheckMs,
         max: config.maxPerSweep,
@@ -84,23 +85,31 @@ export function apply(ctx, rawConfig) {
         }
         const result = await runProbe(record.probe, record.cwd, config.maxBytes)
         checked += 1
+        // A probe verdict is valid only for the probe version that was read;
+        // markProbe ignores a result whose target changed while it ran.
+        const audience = {
+          private: isPrivateRecord(record) || record.sessionId === undefined,
+        }
         if (result.status === 'fail') {
           failed += 1
-          if (record.status !== 'stale') {
-            await store.markProbe(record.id, 'fail', result.detail)
-            await store.event('probe-stale', `${record.id}: ${result.detail}`)
+          const wasActive = record.status !== 'stale'
+          await store.markProbe(record.id, 'fail', result.detail, record.probe)
+          // Already-stale records still advance their check clock (above), but
+          // only an actual transition emits an event.
+          if (wasActive) {
+            await store.event('probe-stale', `${record.id}: ${result.detail}`, record.sessionId, audience)
           }
         } else if (result.status === 'inconclusive') {
           // The check could not see the evidence (too large, unreadable, or
           // outside the scanned window). Record the attempt, change nothing.
           inconclusive += 1
-          await store.markProbe(record.id, 'inconclusive', result.detail)
+          await store.markProbe(record.id, 'inconclusive', result.detail, record.probe)
         } else if (record.status === 'stale') {
           revived += 1
-          await store.markProbe(record.id, 'pass', result.detail)
-          await store.event('probe-revived', `${record.id}: ${result.detail}`)
+          await store.markProbe(record.id, 'pass', result.detail, record.probe)
+          await store.event('probe-revived', `${record.id}: ${result.detail}`, record.sessionId, audience)
         } else {
-          await store.markProbe(record.id, 'pass', result.detail)
+          await store.markProbe(record.id, 'pass', result.detail, record.probe)
         }
       }
       const summary = { checked, failed, revived, inconclusive, ms: nowMs() - started }

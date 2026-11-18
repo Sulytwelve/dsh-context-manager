@@ -1,6 +1,6 @@
 {
   "name": "@sulytwelve/dsh-context-manager",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "DSH Context Manager: context management for DeepSeek Harness — on-demand recall of project knowledge, evidence revalidation, and cross-session task resumption, split into independently toggleable perf tiers.",
   "keywords": [
     "dsh",
@@ -47,8 +47,7 @@
     "icons"
   ],
   "scripts": {
-    "test": "node test/smoke.mjs && node test/regression.mjs",
-    "bench:setup": "node bench/setup.mjs"
+    "test": "node test/smoke.mjs && node test/regression.mjs && node test/tool.mjs"
   },
   "engines": {
     "node": ">=20"

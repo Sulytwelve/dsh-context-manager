@@ -4,14 +4,36 @@
  * The domain only calls `get`/`entries`/`keys`/`size`/`put`/`delete`/
  * `deleteMany`/`update`, so a Map-backed table is a faithful substitute and the
  * tests stay independent of DSH.
+ *
+ * Two real-backend contracts are enforced here because the tests need them:
+ * per-record keys become path segments and must match `[a-zA-Z0-9_-]+`, and
+ * stored values are parsed by the domain's schema at the durable read boundary,
+ * so an undeclared field is dropped. `put` parses eagerly, which is the same
+ * normalization a reopen would apply.
  */
 
 import { createStore } from '../lib/store.js'
 import { DOMAIN_SPEC } from '../lib/domain.js'
 
+/** Mirrors the JSON backend's per-record path-segment rule. */
+export const SAFE_KEY_RE = /^[a-zA-Z0-9_-]+$/
+
 export class FakeTable {
-  constructor() {
+  constructor(valueSchema) {
     this.map = new Map()
+    this.valueSchema = valueSchema
+  }
+
+  #key(key) {
+    const value = String(key)
+    if (!SAFE_KEY_RE.test(value)) {
+      throw new Error(`per-record key '${value}' is not path-safe (must match ${SAFE_KEY_RE})`)
+    }
+    return value
+  }
+
+  #value(value) {
+    return this.valueSchema === undefined ? value : this.valueSchema.parse(value)
   }
 
   get(key) {
@@ -31,7 +53,7 @@ export class FakeTable {
   }
 
   async put(key, value) {
-    this.map.set(key, value)
+    this.map.set(this.#key(key), this.#value(value))
   }
 
   async delete(key) {
@@ -45,8 +67,9 @@ export class FakeTable {
   }
 
   async update(key, fn) {
-    const next = fn(this.map.get(key))
-    this.map.set(key, next)
+    const current = this.map.get(this.#key(key))
+    const next = this.#value(fn(current))
+    this.map.set(this.#key(key), next)
     return next
   }
 }
@@ -54,7 +77,9 @@ export class FakeTable {
 /** One fake storage domain with every declared table. */
 export function fakeDomain() {
   const tables = {}
-  for (const name of Object.keys(DOMAIN_SPEC.tables)) tables[name] = new FakeTable()
+  for (const name of Object.keys(DOMAIN_SPEC.tables)) {
+    tables[name] = new FakeTable(DOMAIN_SPEC.tables[name].valueSchema)
+  }
   return {
     name: DOMAIN_SPEC.name,
     tables,

@@ -41,7 +41,7 @@ the unchanged `agent_memory` domain, so nothing is lost.
 | Row id | Module | Model calls | Cost |
 |---|---|---|---|
 | `memory-core` | `@sulytwelve/dsh-context-manager` | none | One scoring pass per turn start; a few small file writes |
-| `memory-distill` | `…/distill` | 0–2 per qualifying turn, **on in the shipped bundle patch** | One bounded background request, after the turn already closed |
+| `memory-distill` | `…/distill` | at most **one** call per qualifying turn (writes 0–2 records), **on in the shipped bundle patch** | One bounded background request, after the turn already closed |
 | `memory-probe` | `…/probe` | none | A periodic `stat` / substring check of at most 40 records |
 
 `memory-distill` ships enabled because a memory system that never learns
@@ -53,6 +53,15 @@ makes the other two inactive (they inject its store service) and stops all
 injection.
 
 ## Install
+
+**Before you install — what it costs and which switches matter.** The `memory`
+tool schema is about 540 tokens in every request while `memory-core` is enabled
+(cached after the first request). Recall and probes never call a model.
+`memory-distill` is the only model caller and ships on: each qualifying turn may
+spend **one** bounded request (at most 2 records per turn, 2 calls per session,
+12 per day, one per 2-minute cooldown). For a **zero-extra-model-request**
+install, set `llm.enabled: false` in the `memory-distill` row config before the
+first session — recall, probes, and turn-end checkpoints keep working.
 
 The bundle can be installed by the agent that is already running, from a local
 folder, a GitHub repository, or a published package. All three paths end in the
@@ -84,7 +93,7 @@ plugin_manager action=install_bundle
 ```
 
 `github:Sulytwelve/dsh-context-manager` and
-`github:Sulytwelve/dsh-context-manager#v1.1.5` work the same way. The manager
+`github:Sulytwelve/dsh-context-manager#v1.6.1` work the same way. The manager
 installs the package into the current DSH profile and selects the bundle, so the
 three rows appear in **Plugins**.
 
@@ -245,24 +254,47 @@ One tool, `memory`, with operations `recall`, `write`, `forget`, `status`,
 owner, dedupe key, and id so two exports of an unchanged store are identical
 apart from timestamps. It is read-only and paginated (`owner`, `scope`, `status`,
 `limit`, `offset`, default page of 100). Each record line carries its `id` and
-`dedupeKey`; ledger and event rows are local telemetry and are not exported.
-A public-session export omits private records (the header reports
-`privateOmitted`), so a **complete** backup has to run from a declared private
-conversation — otherwise it is the public subset.
+`dedupeKey`. This is a **snapshot of the memory records**, not a complete backup
+of the plugin's data: checkpoints, the ledger, and the event ring are not
+exported. For a full-domain backup, stop DSH and copy
+`$DSH_HOME/storages/agent_memory/` (see **Backup and restore** below).
 
-`import` reads that JSONL back (`path` or inline `payload`) and maps rows to
-records by owner + `dedupeKey`. A newer `updatedAt` wins; an older or equal row is
-skipped, so importing an unchanged export twice changes nothing. Import never
-demotes local state: confidence keeps the higher value and status keeps the
-stronger one. A row with a missing `updatedAt`, or one more than a day in the
-future, is rejected: it would win the newer-wins comparison forever and no later
-import could correct it. Wrong `format`, or a row missing id/dedupeKey/trigger/
-claim, is rejected rather than partially applied; damaged JSONL lines are reported
-by line number. Export → import → export round-trips identically.
+By default an export is scoped to the calling session's owners (its `user`
+records, its project, and its session). `all: true` is the explicit
+operator-wide path for migration; a public-session export still omits private
+records (the header reports `privateOmitted`), so a complete record export has
+to run from a declared private conversation.
+
+`import` reads that JSONL back (`path` relative to the working directory, or
+inline `payload` up to 8 MB) and maps rows to records by owner + `dedupeKey`. A
+newer `updatedAt` wins; an older or equal row is skipped, so importing an
+unchanged export twice changes nothing. Import never demotes local state:
+confidence keeps the higher value and status keeps the stronger one. A row with
+a missing `updatedAt`, or one more than a day in the future, is rejected: it
+would win the newer-wins comparison forever and no later import could correct it.
+Ids must be storage-safe, owner and scope must agree, and a locally matched
+record is never reparented. Claim, evidence, probe, support, and check time are
+applied as one version: a newer claim does not inherit an older probe's
+evidence. Wrong `format`, or a row missing id/dedupeKey/trigger/claim, is
+rejected rather than partially applied; damaged JSONL lines are reported by line
+number. On a same-version store with valid rows, `export → import → export`
+reproduces the record layer.
 
 Import is a write-class capability: the same caller can already call `write`, so
 treat an imported file as untrusted input. Confidence still only falls by an
 explicit `set_confidence` or a `write` with `demote: true`.
+
+Because `owner` embeds the normalized working directory, importing on a machine
+whose checkout path differs does not merge into the local project: the rows land
+under the new owner. Re-map or re-scope deliberately when migrating across
+machines or directories.
+
+Id-based mutations (`forget`, `set_status`, `set_confidence`, `probe`,
+`feedback`) are owner-scoped: a record from another project or session is
+reported as unknown and is never changed; `supersedes` must point into the same
+owner. `user` records are shared across one data root — the deployment model is
+**one operator per `$DSH_HOME`**, and `sensitivity` describes the conversation
+audience, not file ownership.
 
 `report` ends with the last recall's rejection summary — reason counts
 (no-overlap, below-threshold, private, probe-failed, probe-budget, token-budget,
@@ -331,7 +363,13 @@ it. Declare a private session with:
 
 A **public declaration wins** over a conflicting private one
 (`recall.publicSessions`, or `set(sessionId, 'public')`), and every check that
-cannot see a declaration treats the session as public.
+cannot see a declaration treats the session as public. Automatic recall has no
+switch that serves private records to a public session: the audience rule is
+fail-closed and applies to explicit recall and export too.
+
+A write made from a conversation already declared private defaults to
+`sensitivity: "private"` (the same default turn-end distillation uses), so a
+private chat cannot leak what it taught through a plain `write`.
 
 Two migration defaults make existing data safe:
 
@@ -347,11 +385,14 @@ For the QQ bot plugin (`@tencent-connect/dsh-qqbot`) the bridge is available but
 in with `recall.visibilityBridge: true` (or `recall.visibilityBridgePath` to
 relocate the file). When enabled it declares c2c sessions private and group
 sessions public from `~/.dsh-qqbot/model-prefs.json`, re-reading only when that
-file changes, so new sessions are mapped before their first recall. A missing or
-malformed file means "public". The durable alternative is the transport calling
-`memoryVisibility` itself; a validated, optional patch for that ships in
-`integrations/` (see `integrations/README.md`), and once it lands the bridge can
-be deleted.
+file changes, so new sessions are mapped before their first recall. The bridge
+refreshes on every step even when automatic recall is off (tools and checkpoints
+use the same audience), replaces its previous snapshot (a removed mapping is
+withdrawn), and resolves a session mapped as both c2c and group to **public**. A
+missing or malformed file means "public". The durable alternative is the
+transport calling `memoryVisibility` itself; a validated, optional patch for that
+ships in `integrations/` (see `integrations/README.md`), and once it lands the
+bridge can be deleted.
 
 `status` reports the session's visibility, how many private records exist, how
 many were withheld from recall in this session, and whether a checkpoint was
@@ -397,12 +438,14 @@ means the five-probe recall budget is binding, not that the checks failed.
 
 ## Measurement
 
-`memory{op:"report"}` returns the per-session ledger the plugin keeps: steps
-(= model calls), provider-reported input/output tokens, injected tokens,
-distillation calls and their tokens, and the session span. `memory{op:"status"}`
-reports the current session plus store-wide counts.
+`memory{op:"report"}` returns up to the last 40 **persisted** session ledger
+rows: steps (= model calls), provider-reported input/output tokens, injected
+tokens, distillation calls and their tokens, and the session span. It is not
+"this session only" — use `memory{op:"status"}` for the current session's
+counters plus store-wide totals.
 
-Measured on a fixture rebuilt by `node bench/setup.mjs`:
+Measured on a fixture rebuilt by `node bench/setup.mjs` (bench scripts are
+source-checkout only):
 
 - **Cross-session continuation** (diagnose in one session, fix in the next):
   −20% model calls, −16% token volume, −10% wall, same outcome.
@@ -415,8 +458,25 @@ Measured on a fixture rebuilt by `node bench/setup.mjs`:
   checking.
 
 These are token-volume measurements, not billing: uncached input, cached input,
-and output are priced differently. `docs/MEASUREMENTS.md` has the raw tables, the
-control design, the invalid runs, and the caveats.
+and output are priced differently. They are from the v1.1.4–v1.2.0 line and were
+not re-measured for 1.6.1; the scenario is recall without due probes and with
+the QQ bridge off. `injectionMs` includes recall attempts that injected nothing.
+`docs/MEASUREMENTS.md` has the raw tables, the control design, the invalid runs,
+and the caveats.
+
+## Backup and restore
+
+Two different operations:
+
+- **Record snapshot:** `memory{op:"export"}` prints JSONL for inspection and
+  migration. It contains memory records only — no checkpoints, ledger, or event
+  ring. Import it back with `memory{op:"import"}`; on a same-version store with
+  valid rows, export → import → export reproduces the record layer.
+- **Full domain backup:** stop DSH, copy the whole
+  `$DSH_HOME/storages/agent_memory/` tree, and restore it with DSH stopped. This
+  is the only way to preserve checkpoints and telemetry. A public-session export
+  is the public subset; run it from a private conversation if private records
+  must be in the file, or copy the domain.
 
 ## Disable, rollback, uninstall
 
@@ -430,16 +490,23 @@ control design, the invalid runs, and the caveats.
 
 ## Requirements and limits
 
-- DSH `0.2.2-rc.3` with the storage hub, the JSON storage backend, and the
-  `storage-domain` form mounted (both are in the shipped `dsh-base` profile).
+- The plugin's own engine floor is **Node ≥ 20** for the shipped test suites and
+  standalone use. The DSH installation that runs it has its own Node requirement
+  (the desktop app bundles a runtime; a CLI install follows the CLI package's
+  `engines`).
+- DSH **0.2.2-rc.3+** with the storage hub, the JSON storage backend, and the
+  `storage-domain` form mounted (all in the shipped `dsh-base` profile).
+  Verified: Windows 11 + DSH `0.2.2-rc.5` (this release's suites on Node 24) and
+  a Linux host (review) on Node 20.20.2 / 24.22.1. macOS is untested.
 - Retrieval is lexical. A record whose vocabulary does not overlap the user's
   wording will not surface; write triggers in the words you would use to ask.
-- Recall itself does no I/O **unless a probe is due**; a due probe reads the
-  target file asynchronously, bounded by `probeMaxBytes`, so a slow network
-  filesystem delays that recall but does not block other sessions.
-- Packet sizes are estimated at 3.6 non-CJK characters per token (CJK glyphs are
-  one each), deliberately below the Host's 4-character heuristic. The 220-token
-  budget is a conservative ceiling, not an exact prediction.
+- Recall does no I/O **unless a probe is due or the QQ bridge is enabled**. A due
+  probe reads the target file asynchronously, bounded by `probeMaxBytes`, so a
+  slow network filesystem delays that recall but does not block other sessions.
+  The opt-in bridge stats its prefs file once per step.
+- Packet size is enforced with the same estimator that renders it, against both
+  the per-packet budget and the session's remaining allowance; the 220-token
+  default is a ceiling, not a prediction.
 - A probe expresses only the checks the recorder declared. Records without a
   probe are never invalidated automatically.
 - Distillation is a single non-tool request; it cannot read files. It may only
@@ -453,17 +520,23 @@ control design, the invalid runs, and the caveats.
 ## Development
 
 ```bash
-node test/smoke.mjs        # 18 store-level checks, no DSH required
-node test/regression.mjs   # 82 isolation / probe / evidence / privacy / import checks
-node bench/setup.mjs       # build the benchmark fixture
+npm test                    # the three shipped suites
+node test/smoke.mjs         # 18 store-level checks, no DSH required
+node test/regression.mjs    # 104 isolation / probe / budget / privacy / import checks
+node test/tool.mjs          # 10 tool-entry checks against a minimal fake Host
+
+# Benchmarks are source-checkout only (not shipped in the npm package):
+node bench/setup.mjs        # build the benchmark fixture
 node bench/analyze.mjs <session.v4.jsonl.zstd>   # per-session calls/tokens/wall
 node bench/score.mjs "$DSH_HOME/storages/agent_memory" "<query>" --cwd <dir>
 node bench/packet.mjs "$DSH_HOME/storages/agent_memory" "<query>" --cwd <dir>
 ```
 
-GitHub Actions runs the two test suites on every push and pull request
-(`.github/workflows/test.yml`, Node 20 and 22), so the counts above are checked
-rather than remembered.
+GitHub Actions runs the suites on every push and pull request (Node 20/22/24)
+and repeats them from the packed tarball in a clean directory
+(`.github/workflows/test.yml`), so the counts above are checked rather than
+remembered. The suites validate storage keys and the domain schemas the way the
+JSON backend does; a full real-DSH host run is still manual.
 
 `bench/score.mjs` prints every candidate's trigger-coverage breakdown against the
 real records in a live store — use it to tune `minRelevance` for your vocabulary.
@@ -479,6 +552,8 @@ BSD-2-Clause. Copyright (c) 2026, Sulytwelve.
 1. 对正在运行的 agent 说：**安装 `https://github.com/Sulytwelve/dsh-context-manager` 这个插件包并启用**。
    agent 会执行 `plugin_manager install_bundle`，三行插件随即出现在「插件」页。
 2. 新开会话，模型即拥有 `memory` 工具。
+
+**装之前先知道的成本**：`memory-core` 的 `memory` 工具 schema 常驻约 540 token/请求（首次后会缓存）；召回与探针不调模型。`memory-distill` 出厂是开的，每个符合条件的回合最多 1 次有界调用（每会话 2 次、每天 12 次、2 分钟冷却）。想要**零额外模型调用**，先把它配置里的 `llm.enabled` 设为 `false`——召回、探针和 turn-end checkpoint 都不受影响。
 
 **安装位置**（插件装在 profile 里，不在程序安装目录）：
 
@@ -496,4 +571,4 @@ BSD-2-Clause. Copyright (c) 2026, Sulytwelve.
 - 想让记忆更积极：把 `memory-core` 的 `recall.minRelevance` 调低（例如 2.0）。
 - 想完全关掉后台模型调用：把 `memory-distill` 的 `llm.enabled` 设为 `false`。
 - 想整体停用：逐个关闭三行，或 `remove_bundle`；数据保留在 `$DSH_HOME/storages/agent_memory/`。
-- 查看本次会话的 token / 调用次数：`{"op":"report"}`。
+- 查看**当前会话**的计数与状态：`{"op":"status"}`。`{"op":"report"}` 汇总的是最近最多 40 条**已持久化的会话账本**（含历史会话），不是只统计本次会话。

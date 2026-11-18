@@ -142,7 +142,8 @@ One tool, `memory`, with operations:
 - `export` — read-only JSONL of the store, one page at a time.
 - `status` — counters for this session and the store, the review hint, and a
   checkpoint left by another session.
-- `report` — the per-session token/call/latency ledger.
+- `report` — up to the last 40 **persisted** session ledger rows
+  (token/call/latency), not this session alone.
 
 ## Private records
 
@@ -151,9 +152,11 @@ would otherwise be injected into any other conversation, including a shared one.
 The gate is fail-closed and structural rather than advisory:
 
 - `write` accepts `sensitivity: "private" | "public"` and stores it on the
-  record; sensitivity is independent of owner scope;
-- automatic recall drops private records unless the session is declared private
-  (`recall.gatePrivate`, default on), and counts them in the ledger;
+  record; sensitivity is independent of owner scope. A write from a conversation
+  already declared private defaults to `private`;
+- automatic recall drops private records unless the session is declared private,
+  and counts them in the ledger. There is no config switch that serves them to a
+  public session;
 - an explicit `recall` obeys the same boundary: in a public conversation it
   returns the suppressed count only, never ids, triggers, or text. The fix is to
   switch the conversation to private, not to call the tool harder;
@@ -216,18 +219,25 @@ file no longer lists. The patch applies to a checkout of the MIT-licensed
 `trigger`, `claim`, `evidence`, `confidence`, `status`, `probe`, `tags`, and the
 timestamps). Rows are sorted by owner, dedupe key, and id, so two exports of an
 unchanged store differ only in `generatedAt`. Filters are `owner`, `scope`,
-`status`, `limit` (default 100, capped at 500), and `offset`. The ledger and
-event tables are intentionally excluded: they are local telemetry, not memory.
+`status`, `limit` (default 100, capped at 500), and `offset`. This is a snapshot
+of the **memory records** only: checkpoints, the ledger, and the event ring are
+local telemetry and are not exported. For a full-domain backup, stop DSH and
+copy the whole `$DSH_HOME/storages/agent_memory/` tree.
 
-**A complete backup needs a private conversation.** A public-session export
-omits private records and reports only `privateOmitted` in the header, which is
-correct for sharing but wrong for a backup. Before exporting a full copy, either
-declare the session in `recall.privateSessions` (or via `memoryVisibility`) and
-run the export there, or accept that the export is the public subset.
+Scope: by default an export covers the caller's owners (`user`, its project,
+its session); `all: true` is the explicit operator-wide path for migration.
+
+**A complete record export needs a private conversation.** A public-session
+export omits private records and reports only `privateOmitted` in the header.
+Before exporting a full record copy, either declare the session in
+`recall.privateSessions` (or via `memoryVisibility`) and run the export there, or
+copy the storage domain instead.
 
 Import maps rows back by `owner + dedupeKey`, **not** by claim similarity: a
 `write` re-derivation would merge two records that carry different ids and can
-silently pick a different winner. The rules:
+silently pick a different winner. `path` is resolved against the calling
+session's working directory; `payload` is capped at 8 MB of UTF-8 bytes. The
+rules:
 
 - a row whose `updatedAt` is newer replaces the local content; an older or equal
   row is skipped, which makes an unchanged import idempotent;
@@ -242,15 +252,22 @@ silently pick a different winner. The rules:
   observation wins, an older one cannot un-retire — but when the revived record
   shares a trigger with one that stayed active, `status` reports the group via
   the review hint so the two can be reconciled.
-- a row with the wrong `format`, or missing `id`, `dedupeKey`, `trigger`, or
-  `claim`, is rejected whole, never partially applied; damaged JSONL lines are
-  skipped and reported by line number;
+- a row with the wrong `format`, an id that is not storage-safe, an owner that
+  disagrees with its scope, or missing `id`, `dedupeKey`, `trigger`, or `claim`,
+  is rejected whole, never partially applied; damaged JSONL lines are skipped
+  and reported by line number;
 - a row whose `updatedAt` is missing or more than a day in the future is
   rejected: it would always win the newer-wins comparison and no later import
   could correct it. A day of clock skew is tolerated;
+- a locally matched record is never reparented: the row's owner must match the
+  existing record's owner, and one row matching two different records is
+  rejected;
+- claim, evidence, probe, support, and `lastCheckedAt` are applied as **one
+  version**: a newer claim drops the old probe's evidence instead of inheriting
+  it;
 - on insert the original `id`, `dedupeKey`, timestamps, counters, provenance,
-  and supersession links are preserved, so `export → import → export` is
-  identical.
+  and supersession links are preserved, so on a same-version store with valid
+  rows `export → import → export` reproduces the record layer.
 
 Import is a write-class capability, not a lower trust boundary: the same caller
 can already call `write`, but a row also carries timestamps and counters, so an
@@ -281,8 +298,26 @@ node bench/packet.mjs "$DSH_HOME/storages/agent_memory" "<prompt>" --cwd <dir>
 Raise `recall.minRelevance` when the packet shows a weak match, lower it when a
 relevant record is missing. `bench/packet.mjs` also shows the injection token
 cost, which is what `recall.tokenBudget` bounds. The installed package ships
-`test/`, so `node test/smoke.mjs` and `node test/regression.mjs` can be run from
-the installed copy.
+`test/`, so `node test/smoke.mjs`, `node test/regression.mjs`, and
+`node test/tool.mjs` can be run from the installed copy; the bench scripts are
+source-checkout only.
+
+## Diagnostics and audience
+
+`status` renders the recent event ring into the calling conversation, so it is
+audience-filtered: only events from this session (or global boot lines), and
+outside a private session only events explicitly marked public. Legacy free-text
+events have no audience and are hidden. Write, inject, probe, distill, and
+checkpoint-skip events are tagged with the audience of the session or record
+they describe.
+
+## Ownership and the management boundary
+
+One DSH data root is one operator. `scope` is a retrieval boundary and, for
+`project` and `session` records, a management boundary: id-based operations and
+`supersedes` from another owner are reported as unknown, and `export` is scoped
+to the caller unless `all: true` is passed. `user` records are shared across the
+data root; `sensitivity` is a conversation-audience rule, not file ownership.
 
 ## Hot reload
 
@@ -299,11 +334,16 @@ storage error; the next reload retries.
 - Retrieval is lexical, not semantic. A record whose vocabulary does not overlap
   the user's wording will not surface; write triggers in the words you would use
   to ask for it.
-- Recall is free of I/O only while no probe is due; a due probe reads up to
-  `probeMaxBytes` from the head plus 64 KiB from the tail, asynchronously. Five
-  probes per recall and 40 per sweep are hard caps.
+- Recall is free of I/O only while no probe is due and the QQ bridge is off; a
+  due probe reads up to `probeMaxBytes` from the head plus 64 KiB from the tail,
+  asynchronously. The opt-in bridge stats its prefs file once per step. Five
+  probes per recall and 40 per sweep are hard caps. The sweep filters the whole
+  store by due state before taking its batch, and a stale record that fails
+  again still advances its check clock.
 - A probe only expresses the checks the recorder declared. Records without a
-  probe are never automatically invalidated.
+  probe are never automatically invalidated. A probe verdict is applied only if
+  the record's probe is still the one that was read; a replaced probe ignores
+  the late result.
 - Distillation is a single non-tool model call; it cannot read files. Its output
   is evidence-checked only against the turn's own tool results — a candidate that
   cites nothing, cites a failed call, or makes a behavioural claim without a
@@ -313,7 +353,8 @@ storage error; the next reload retries.
   `set_confidence` makes correcting that cheap, but nothing corrects it
   automatically.
 - Measurement counters are per process until flushed at turn end; a hard crash
-  can lose the current turn's counters. The distillation budget is rebuilt from
-  the ledger at start, so a restart does not reset the daily cap.
+  can lose the current turn's token counters. The distillation attempt itself is
+  reserved and persisted before the request, so a crash cannot refund it, and
+  the per-day reserve and last-attempt time are rebuilt from the ledger at start.
 - Disabling `memory-core` leaves existing data on disk (re-enabling resumes it)
   and makes `memory-distill` and `memory-probe` inactive until it returns.

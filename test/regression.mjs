@@ -12,16 +12,16 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { summarizeDistillLedger } from '../lib/budget.js'
+import { evaluateDistillBudget, reserveDistillBudget, summarizeDistillLedger } from '../lib/budget.js'
 import { evaluateCheckpointGuard } from '../lib/checkpoint-guard.js'
 import { checkContract } from '../lib/contract.js'
 import { openDomainWithRetry } from '../lib/domain-open.js'
 import { applySessionScopes, bridgeStamp, qqbotScopeOfSessionKey, qqbotSessionScopes, readQqbotSessionScopes } from '../lib/visibility-bridge.js'
-import { normalizeCwdOn, runProbe, safeKey, normalizeCwd } from '../lib/util.js'
+import { normalizeCwdOn, estimateTokens, runProbe, safeKey, normalizeCwd } from '../lib/util.js'
 import { ownerFor } from '../lib/store.js'
 import { probeDue, selectProbeCandidates } from '../lib/probe-plan.js'
 import { evaluateSupport, toolClass } from '../lib/support.js'
-import { recallEnabled, rejectReportLines, reviewLines } from '../index.js'
+import { buildPacket, recallEnabled, rejectReportLines, reviewLines } from '../index.js'
 import { createChecker, makeStore, reopen, TEST_CONFIG } from './harness.mjs'
 
 const check = createChecker()
@@ -671,19 +671,37 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
   const day = '2026-11-18'
   const at = Date.parse(`${day}T03:00:00Z`)
   const rows = [
-    { sessionId: 'a', updatedAt: at, distillCalls: 2, distillInputTokens: 10, distillOutputTokens: 5 },
-    { sessionId: 'a', updatedAt: at + 1000, distillCalls: 1, distillInputTokens: 1, distillOutputTokens: 1 },
-    { sessionId: 'b', updatedAt: at, distillCalls: 1, distillInputTokens: 2, distillOutputTokens: 2 },
-    { sessionId: 'c', updatedAt: at - 86_400_000, distillCalls: 9 },
+    { sessionId: 'a', distillDay: day, distillCallsToday: 2, lastDistillAt: at, distillInputTokens: 10, distillOutputTokens: 5 },
+    { sessionId: 'b', distillDay: day, distillCallsToday: 1, lastDistillAt: at - 1000, distillInputTokens: 2, distillOutputTokens: 2 },
+    { sessionId: 'c', distillDay: '2026-11-17', distillCallsToday: 9, lastDistillAt: at - 86_400_000, distillInputTokens: 99 },
   ]
-  check('the daily distill budget is reconstructed from ledger rows', () => {
+  check('the daily distill budget is reconstructed from persisted per-day counters', () => {
     const sum = summarizeDistillLedger(rows, day)
-    assert.equal(sum.calls, 4)
-    assert.equal(sum.bySession.get('a'), 3)
+    assert.equal(sum.calls, 3)
+    assert.equal(sum.bySession.get('a'), 2)
     assert.equal(sum.bySession.get('b'), 1)
     assert.equal(sum.bySession.has('c'), false)
-    assert.equal(sum.inputTokens, 13)
-    assert.equal(sum.outputTokens, 8)
+    assert.equal(sum.inputTokens, 12)
+    assert.equal(sum.outputTokens, 7)
+    assert.equal(sum.lastAt.get('a'), at)
+  })
+
+  check('the cooldown and caps gate one reservation', () => {
+    const config = { includeSubagents: true, llm: { minIntervalMs: 120_000, maxCallsPerSession: 2, maxCallsPerDay: 5 } }
+    const budgets = { day, calls: 0, bySession: new Map(), lastAt: new Map() }
+    assert.equal(evaluateDistillBudget({ budgets, config, sessionId: 's', isSubagent: false, now: at }).allowed, true)
+    reserveDistillBudget(budgets, 's', at)
+    const cooling = evaluateDistillBudget({ budgets, config, sessionId: 's', isSubagent: false, now: at + 60_000 })
+    assert.equal(cooling.allowed, false)
+    assert.equal(cooling.reason, 'cooldown')
+    assert.equal(evaluateDistillBudget({ budgets, config, sessionId: 's', isSubagent: false, now: at + 120_000 }).allowed, true)
+    reserveDistillBudget(budgets, 's', at + 120_000)
+    assert.equal(evaluateDistillBudget({ budgets, config, sessionId: 's', isSubagent: false, now: at + 240_000 }).reason, 'session-cap')
+    assert.equal(evaluateDistillBudget({ budgets, config, sessionId: 'other', isSubagent: false, now: at + 240_000 }).allowed, true)
+    const daily = { day, calls: 5, bySession: new Map(), lastAt: new Map() }
+    assert.equal(evaluateDistillBudget({ budgets: daily, config, sessionId: 'x', isSubagent: false, now: at }).reason, 'daily-cap')
+    // A new UTC day resets the day's counter.
+    assert.equal(evaluateDistillBudget({ budgets: daily, config, sessionId: 'x', isSubagent: false, now: at + 86_400_000 }).allowed, true)
   })
 }
 
@@ -946,6 +964,26 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.equal(store.getCheckpoint(legacyCwd, 'new-session'), undefined)
     assert.equal(store.hasWithheldCheckpoint(legacyCwd, 'new-session'), true)
     assert.equal(store.hasWithheldCheckpoint(legacyCwd, 'old-session'), false)
+  })
+
+  // The durable read boundary is where the 1.6.0 bug bit: `sensitivity` was not
+  // declared on the task schema, so a public checkpoint reopened as "unknown"
+  // and was withheld from every other session. Reopen against the same tables
+  // and re-check all three classifications.
+  const reopened = reopen(domain)
+  await check('a public checkpoint stays readable to other sessions after a reopen', () => {
+    assert.equal(reopened.getCheckpoint(cwd, 'session-c')?.milestone, 'shared task state')
+    assert.equal(reopened.hasWithheldCheckpoint(cwd, 'session-c'), false)
+  })
+  await check('a private checkpoint stays private (and present) after a reopen', () => {
+    assert.equal(reopened.getCheckpoint(cwd, 'session-a')?.milestone, 'private task state')
+    // Another session sees the shared checkpoint, never the private one.
+    assert.equal(reopened.getCheckpoint(cwd, 'session-c')?.milestone, 'shared task state')
+    assert.equal(reopened.getCheckpoint(cwd, 'session-a')?.sensitivity, 'private')
+  })
+  await check('a legacy checkpoint is still withheld after a reopen', () => {
+    assert.equal(reopened.getCheckpoint(legacyCwd, 'new-session'), undefined)
+    assert.equal(reopened.getCheckpoint(legacyCwd, 'old-session')?.milestone, 'legacy state from before classification')
   })
 }
 
@@ -1250,16 +1288,227 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.throws(() => store.resolveId(''), /"id" is required/)
   })
 
-  await domain.table('memories').put('mem_aaaaaaaa_abc123', {
-    id: 'mem_aaaaaaaa_abc123', status: 'active', scope: 'project', kind: 'fact',
-    trigger: 't', claim: 'c', confidence: 0.5, updatedAt: 1,
+  const stub = id => ({
+    id, key: `stub:${id}`, scope: 'project', kind: 'fact', trigger: 'stub trigger',
+    claim: 'stub claim long enough', status: 'active', confidence: 0.5,
+    createdAt: 1, updatedAt: 1, uses: 0, wins: 0, harms: 0, tags: [], origin: 'test', cwd: 'C:/stub',
   })
-  await domain.table('memories').put('mem_bbbbbbbb_abc123', {
-    id: 'mem_bbbbbbbb_abc123', status: 'active', scope: 'project', kind: 'fact',
-    trigger: 't', claim: 'c', confidence: 0.5, updatedAt: 1,
-  })
+  await domain.table('memories').put('mem_aaaaaaaa_abc123', stub('mem_aaaaaaaa_abc123'))
+  await domain.table('memories').put('mem_bbbbbbbb_abc123', stub('mem_bbbbbbbb_abc123'))
   check('an ambiguous id suffix is refused instead of guessing', () => {
     assert.throws(() => store.resolveId('abc123'), /ambiguous/)
+  })
+}
+
+// --------------------------------------------- diagnostics audience filtering
+
+{
+  const { store } = makeStore()
+  await store.event('write', 'created mine (private) mem_aaaaaa', 'private-session', { private: true })
+  await store.event('write', 'created ours mem_bbbbbb', 'public-session', { private: false })
+  await store.event('legacy', 'old free text mem_cccccc', 'public-session')
+  await store.event('boot', 'memory core ready', undefined, { private: false })
+
+  check('a public session never sees another session’s private diagnostics', () => {
+    const visible = store.recentEvents(10, { sessionId: 'public-session', visibility: 'public' })
+    const text = visible.map(item => item.detail).join('|')
+    assert.equal(text.includes('mem_aaaaaa'), false)
+    assert.equal(text.includes('mem_bbbbbb'), true)
+    // Legacy free text has no audience; it is hidden outside a private session.
+    assert.equal(text.includes('mem_cccccc'), false)
+    assert.equal(text.includes('memory core ready'), true)
+  })
+
+  check('a private session sees its own private diagnostics', () => {
+    const visible = store.recentEvents(10, { sessionId: 'private-session', visibility: 'private' })
+    assert.equal(visible.some(item => item.detail.includes('mem_aaaaaa')), true)
+  })
+}
+
+// ------------------------------------------------ packet budget (CJK and caps)
+
+{
+  const { store } = makeStore()
+  const dir = join(root, 'packet-budget')
+  mkdirSync(dir, { recursive: true })
+  const long = '检查点'.repeat(220)
+  await store.checkpoint(dir, {
+    milestone: long, nextAction: long, openQuestion: long, acceptance: long, sessionId: 'writer',
+  })
+  await store.write({
+    scope: 'project', kind: 'procedure', trigger: 'deploy the packet budget fixture',
+    claim: 'Run node deploy.mjs and then verify the marker file before reporting success.',
+    evidence: 'deploy.mjs', confidence: 0.9, cwd: dir, origin: 'test',
+  })
+  const recallConfig = {
+    limit: 3, tokenBudget: 220, minRelevance: 2.5, probeOnRecall: false, probeTtlMs: 86_400_000,
+    probeBudget: 5, resumeMaxAgeMs: 604_800_000,
+  }
+  const packet = await buildPacket(store, {
+    query: 'resume the last checkpoint and deploy the fixture',
+    cwd: dir, excludeIds: new Set(), includeResume: true, sessionId: 'reader', recall: recallConfig,
+  })
+  check('a Chinese checkpoint cannot push the packet over its token budget', () => {
+    assert.ok(packet.text.length > 0)
+    assert.ok(estimateTokens(packet.text) <= 220, `packet ${estimateTokens(packet.text)} > 220`)
+    assert.ok(packet.tokens <= 220)
+  })
+  check('only rendered records are reported as used', () => {
+    assert.equal(packet.usedIds.length, packet.used)
+    for (const id of packet.usedIds) assert.ok(packet.text.includes(id.slice(-6)))
+  })
+  const tight = await buildPacket(store, {
+    query: 'resume the last checkpoint and deploy the fixture',
+    cwd: dir, excludeIds: new Set(), includeResume: true, sessionId: 'reader', recall: recallConfig,
+    sessionRemainingTokens: 120,
+  })
+  check('the remaining session allowance caps a packet below the per-packet budget', () => {
+    assert.ok(tight.text === '' || estimateTokens(tight.text) <= 120)
+  })
+}
+
+// ------------------------------------------------------ probe scheduling fixes
+
+{
+  const { store } = makeStore()
+  const dir = join(root, 'probe-sweep')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'ok.txt'), 'ok')
+  for (let index = 0; index < 20; index += 1) {
+    await store.write({
+      scope: 'project', kind: 'fact', trigger: `filler probe record ${index}`,
+      claim: `Filler record ${index} exists only to fill the recent window.`,
+      cwd: dir, origin: 'test',
+    })
+  }
+  const old = await store.write({
+    scope: 'project', kind: 'fact', trigger: 'old probe target',
+    claim: 'The old record points at a marker that should be checked.',
+    probe: { kind: 'file-contains', target: 'ok.txt', pattern: 'ok' },
+    cwd: dir, origin: 'test',
+  })
+  const raw = store.get(old.record.id)
+  await store.domain.table('memories').put(raw.id, { ...raw, updatedAt: 1, createdAt: 1 })
+  const picked = store.probeCandidates({ now: Date.now(), recheckMs: 3_600_000, max: 1 })
+  check('the sweep selects an old never-checked record, not only recent ones', () => {
+    assert.equal(picked.length, 1)
+    assert.equal(picked[0].id, old.record.id)
+  })
+
+  const failing = await store.write({
+    scope: 'project', kind: 'fact', trigger: 'a marker that is already gone',
+    claim: 'This record is checked against a marker that has already been removed.',
+    probe: { kind: 'path-exists', target: 'gone.txt' }, cwd: dir, origin: 'test',
+  })
+  await store.markProbe(failing.record.id, 'fail', 'missing', failing.record.probe)
+  const staleBefore = store.get(failing.record.id)
+  await new Promise(resolve => setTimeout(resolve, 5))
+  await store.markProbe(staleBefore.id, 'fail', 'still missing', staleBefore.probe)
+  check('a stale record that fails again advances its check clock without re-stamping freshness', () => {
+    const staleAfter = store.get(staleBefore.id)
+    assert.equal(staleAfter.status, 'stale')
+    assert.ok(staleAfter.lastCheckedAt > staleBefore.lastCheckedAt)
+    assert.equal(staleAfter.updatedAt, staleBefore.updatedAt)
+  })
+  await check('a probe verdict for a replaced probe is ignored', async () => {
+    await store.markProbe(staleBefore.id, 'pass', 'old target appeared', { kind: 'path-exists', target: 'other.txt' })
+    assert.equal(store.get(staleBefore.id).status, 'stale')
+  })
+
+  const sessionRecord = await store.write({
+    scope: 'session', kind: 'fact', trigger: 'a session-scoped probe target',
+    claim: 'The session record resolves its probe against the captured directory.',
+    probe: { kind: 'file-contains', target: 'ok.txt', pattern: 'ok' },
+    cwd: dir, sessionId: 'session-probe', origin: 'test',
+  })
+  check('a session-scope record keeps the directory its probe was written against', () => {
+    assert.equal(store.get(sessionRecord.record.id).cwd, dir)
+    assert.equal(ownerFor('session', undefined, 'session-probe'), 'session:session-probe')
+  })
+}
+
+// ------------------------------------ owner boundaries, bridge, import guards
+
+{
+  const { store } = makeStore()
+  const b = await store.write({
+    scope: 'project', kind: 'fact', trigger: 'a record in project b',
+    claim: 'Project B has its own fact that project A must not retire.',
+    cwd: projectB, origin: 'test',
+  })
+  let crossOwner
+  try {
+    await store.write({
+      scope: 'project', kind: 'fact', trigger: 'a project a record',
+      claim: 'Project A record that tries to retire a project B record.',
+      cwd: projectA, supersedes: b.record.id, origin: 'test',
+    })
+  } catch (error) {
+    crossOwner = error
+  }
+  check('supersedes cannot retire a record from another owner', () => {
+    assert.match(String(crossOwner?.message), /same owner/)
+  })
+}
+
+{
+  const { store } = makeStore()
+  applySessionScopes(store, new Map([['bridge-a', 'private'], ['bridge-b', 'public']]))
+  check('the bridge declares both scopes', () => {
+    assert.equal(store.sessionVisibility('bridge-a'), 'private')
+    assert.equal(store.sessionVisibility('bridge-b'), 'public')
+  })
+  applySessionScopes(store, new Map([['bridge-a', 'public']]))
+  check('replacing the bridge snapshot withdraws a mapping that disappeared', () => {
+    assert.equal(store.sessionVisibility('bridge-a'), 'public')
+    assert.equal(store.sessionVisibility('bridge-b'), 'public')
+  })
+  check('a conflicting c2c and group mapping resolves to public', () => {
+    const scopes = qqbotSessionScopes({ sessionIds: { 'qqbot:1:c2c:x': 'same', 'qqbot:1:group:y': 'same' } })
+    assert.equal(scopes.get('same'), 'public')
+  })
+  const seeded = makeStore({ ...TEST_CONFIG, recall: { privateSessions: ['seeded-session'] } })
+  applySessionScopes(seeded.store, new Map())
+  check('the bridge snapshot never erases a config-declared private session', () => {
+    assert.equal(seeded.store.sessionVisibility('seeded-session'), 'private')
+  })
+}
+
+{
+  const { store } = makeStore()
+  const base = {
+    type: 'memory', format: 1, id: 'mem_import_guard',
+    dedupeKey: 'project:fact:import guard', owner: 'project:C:/fixture', scope: 'project', kind: 'fact',
+    trigger: 'the import guard fixture', claim: 'An imported row must carry a valid identity and timestamp.',
+    confidence: 0.5, status: 'active', createdAt: 1_700_000_000_000, updatedAt: 1_700_000_000_000,
+  }
+  check('import rejects an id that is not a storage-safe key', async () => {
+    const result = await store.importRows([{ ...base, id: 'mem_bad|id' }])
+    assert.equal(result.rejected, 1)
+  })
+  check('import rejects an owner that disagrees with its scope', async () => {
+    const result = await store.importRows([{ ...base, id: 'mem_import_owner', scope: 'user', owner: 'project:C:/fixture' }])
+    assert.equal(result.rejected, 1)
+  })
+  await store.importRows([base])
+  check('import refuses to reparent an existing id', async () => {
+    const result = await store.importRows([{ ...base, owner: 'project:C:/other', updatedAt: base.updatedAt + 10_000 }])
+    assert.equal(result.rejected, 1)
+  })
+  const versioned = {
+    ...base, id: 'mem_import_version', dedupeKey: 'project:fact:import version',
+    probe: { kind: 'path-exists', target: 'C:/fixture/file.txt' }, lastCheckedAt: base.updatedAt + 500,
+  }
+  await store.importRows([versioned])
+  await store.importRows([{
+    ...versioned, claim: 'A newer claim that no longer carries the old probe.',
+    probe: undefined, lastCheckedAt: undefined, updatedAt: versioned.updatedAt + 1000,
+  }])
+  check('a newer import replaces claim and probe as one version', () => {
+    const record = store.get('mem_import_version')
+    assert.match(record.claim, /newer claim/)
+    assert.equal(record.probe, undefined)
+    assert.equal(record.lastCheckedAt, undefined)
   })
 }
 
