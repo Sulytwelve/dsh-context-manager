@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs'
 import { checkContract } from './lib/contract.js'
 import { openDomainWithRetry } from './lib/domain-open.js'
 import { DOMAIN_SPEC } from './lib/domain.js'
-import { applySessionScopes, qqbotPrefsPath, readQqbotSessionScopes } from './lib/visibility-bridge.js'
+import { applySessionScopes, bridgeStamp, qqbotPrefsPath, readQqbotSessionScopes } from './lib/visibility-bridge.js'
 import { EXPORT_FORMAT, createStore, isPrivateRecord, shortId } from './lib/store.js'
 import {
   age, claimedUserText, clip, contextMessage, estimateTokens, nowMs, oneLine, runProbe, similarity,
@@ -642,22 +642,27 @@ function registerRecall(ctx, store, config) {
     return
   }
   // The QQ bot plugin knows c2c from group but does not expose it; its prefs
-  // file is the only durable place the scope crosses a process boundary. Read
-  // it once per new session (not per turn) and apply the declarations.
+  // file is the only durable place the scope crosses a process boundary. It is
+  // re-read only when its mtime/size changes, so a new session is mapped before
+  // its first recall and a mid-session change is picked up on the next step
+  // without watching (or reading) another plugin's file on every turn.
   const bridgeEnabled = recall.visibilityBridge !== false
   const bridgePath = recall.visibilityBridgePath ?? qqbotPrefsPath()
-  const bridged = new Set()
-  const applyBridge = (sessionId) => {
-    if (!bridgeEnabled || bridged.has(sessionId)) return
-    bridged.add(sessionId)
-    applySessionScopes(store, readQqbotSessionScopes(bridgePath))
+  let lastBridgeStamp
+  const refreshBridge = () => {
+    if (!bridgeEnabled) return
+    const stamp = bridgeStamp(bridgePath)
+    if (stamp === lastBridgeStamp) return
+    lastBridgeStamp = stamp
+    const applied = applySessionScopes(store, readQqbotSessionScopes(bridgePath))
+    if (applied > 0) store.log('debug', `visibility bridge: ${applied} session mapping(s) from ${bridgePath}`)
   }
   ctx.on('agent/pre-step', async (payload, next) => {
     const decision = await next()
     if (decision.kind === 'reject' || payload.signal?.aborted) return decision
     const started = nowMs()
     const sessionId = sessionIdOf(payload.agent)
-    applyBridge(sessionId)
+    refreshBridge()
     try {
       const header = payload.agent.session?.header
       const isSubagent = header?.origin === 'subagent'

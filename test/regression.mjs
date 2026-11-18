@@ -16,7 +16,7 @@ import { summarizeDistillLedger } from '../lib/budget.js'
 import { evaluateCheckpointGuard } from '../lib/checkpoint-guard.js'
 import { checkContract } from '../lib/contract.js'
 import { openDomainWithRetry } from '../lib/domain-open.js'
-import { applySessionScopes, qqbotScopeOfSessionKey, qqbotSessionScopes, readQqbotSessionScopes } from '../lib/visibility-bridge.js'
+import { applySessionScopes, bridgeStamp, qqbotScopeOfSessionKey, qqbotSessionScopes, readQqbotSessionScopes } from '../lib/visibility-bridge.js'
 import { normalizeCwdOn, runProbe, safeKey, normalizeCwd } from '../lib/util.js'
 import { ownerFor } from '../lib/store.js'
 import { probeDue, selectProbeCandidates } from '../lib/probe-plan.js'
@@ -991,6 +991,17 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.equal(qqbotScopeOfSessionKey('qqbot:9:channel:x'), undefined)
     assert.equal(qqbotScopeOfSessionKey(undefined), undefined)
     assert.equal(qqbotScopeOfSessionKey(''), undefined)
+  })
+
+  check('the bridge re-reads only when the preference file changes', () => {
+    const path = join(root, 'bridge-stamp.json')
+    assert.equal(bridgeStamp(path), 'missing')
+    writeFileSync(path, '{"sessionIds":{}}')
+    const first = bridgeStamp(path)
+    assert.notEqual(first, 'missing')
+    assert.equal(bridgeStamp(path), first)
+    writeFileSync(path, '{"sessionIds":{"qqbot:1:c2c:x":"session-1"}}')
+    assert.notEqual(bridgeStamp(path), first)
   })
 }
 

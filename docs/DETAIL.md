@@ -193,19 +193,18 @@ session ids are random (`session-<uuid>`), so it cannot be read from the session
 id. The plugin does persist the mapping in `~/.dsh-qqbot/model-prefs.json`
 (`sessionIds: { "qqbot:<appId>:c2c:<peer>": "session-…" }`), and this plugin can
 read it — `recall.visibilityBridge: true` opts in; it is off by default because
-it reads another plugin's data file. The bridge is a snapshot read at start and
-again on each **new session's first step**, so a QQ session created after boot is
-mapped before its first recall (no restart needed); it is not a live watcher, so
-a change inside an already-running session is not re-read. That limitation is why
-the durable fix belongs in the transport — one call after the session is created
-or resumed:
-
-```js
-agent.ctx.get?.('memoryVisibility')?.set(sessionId, scope === 'c2c' ? 'private' : 'public')
-```
+it reads another plugin's data file. The bridge re-reads only when the file's
+mtime/size changes (checked once per step), so a QQ session created after boot is
+mapped before its first recall and a mid-session change is picked up on the next
+step. It is still a foreign-file read, so the durable fix belongs in the
+transport: `integrations/dsh-qqbot-memory-visibility.patch` is a validated,
+fail-soft patch that makes `dsh-qqbot` call the service directly after a session
+is created, resumed, or re-forked (see `integrations/README.md`). Once that
+lands, the bridge can be deleted.
 
 That call also covers sessions that `/new` has since re-keyed, which the prefs
-file no longer lists.
+file no longer lists. The patch applies to a checkout of the MIT-licensed
+`dsh-qqbot`; no rights are assumed over the upstream package.
 
 ## Export and import
 

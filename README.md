@@ -337,9 +337,12 @@ For the QQ bot plugin (`@tencent-connect/dsh-qqbot`) the bridge is available but
 **off by default** — it reads another plugin's data file, so the operator opts
 in with `recall.visibilityBridge: true` (or `recall.visibilityBridgePath` to
 relocate the file). When enabled it declares c2c sessions private and group
-sessions public from `~/.dsh-qqbot/model-prefs.json`; a missing or malformed
-file means "public". The durable alternative is the transport calling
-`memoryVisibility` itself.
+sessions public from `~/.dsh-qqbot/model-prefs.json`, re-reading only when that
+file changes, so new sessions are mapped before their first recall. A missing or
+malformed file means "public". The durable alternative is the transport calling
+`memoryVisibility` itself; a validated, optional patch for that ships in
+`integrations/` (see `integrations/README.md`), and once it lands the bridge can
+be deleted.
 
 `status` reports the session's visibility, how many private records exist, how
 many were withheld from recall in this session, and whether a checkpoint was
@@ -432,7 +435,7 @@ control design, the invalid runs, and the caveats.
 
 ```bash
 node test/smoke.mjs        # 18 store-level checks, no DSH required
-node test/regression.mjs   # 76 isolation / probe / evidence / privacy / import checks
+node test/regression.mjs   # 77 isolation / probe / evidence / privacy / import checks
 node bench/setup.mjs       # build the benchmark fixture
 node bench/analyze.mjs <session.v4.jsonl.zstd>   # per-session calls/tokens/wall
 node bench/score.mjs "$DSH_HOME/storages/agent_memory" "<query>" --cwd <dir>

@@ -15,10 +15,18 @@ All notable changes to `@sulytwelve/dsh-context-manager` (formerly
   watcher. Two regression cases pin the ladder (a newer active row revives a
   superseded record; a newer proposed row reopens a stale one as proposed).
 
-## 1.5 (planned)
+## 1.5.0
 
-- Retire the QQ bridge: the transport calls `memoryVisibility` directly. Until
-  then the bridge stays opt-in and is documented as best-effort.
+- **The bridge is live.** The QQ-prefs bridge no longer reads the file only at
+  start and on a new session's first step: it re-reads when the file's
+  mtime/size changes (checked once per step), so a session created after boot is
+  mapped before its first recall and a mid-session change is picked up on the
+  next step. It remains off by default and is still a foreign-file read.
+- **The transport patch ships.** `integrations/dsh-qqbot-memory-visibility.patch`
+  is a validated, fail-soft patch for the MIT-licensed `@tencent-connect/dsh-qqbot`
+  that calls `memoryVisibility` after a session is created, resumed, or re-forked
+  — the durable replacement for the bridge. `integrations/README.md` documents
+  applying it. Once it lands, the bridge can be deleted.
 
 ## 1.4.0
 
