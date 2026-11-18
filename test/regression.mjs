@@ -15,12 +15,13 @@ import { join } from 'node:path'
 import { summarizeDistillLedger } from '../lib/budget.js'
 import { evaluateCheckpointGuard } from '../lib/checkpoint-guard.js'
 import { checkContract } from '../lib/contract.js'
-import { normalizeCwdOn, runProbe } from '../lib/util.js'
+import { applySessionScopes, qqbotScopeOfSessionKey, qqbotSessionScopes, readQqbotSessionScopes } from '../lib/visibility-bridge.js'
+import { normalizeCwdOn, runProbe, safeKey, normalizeCwd } from '../lib/util.js'
 import { ownerFor } from '../lib/store.js'
 import { probeDue, selectProbeCandidates } from '../lib/probe-plan.js'
 import { evaluateSupport, toolClass } from '../lib/support.js'
 import { recallEnabled, reviewLines } from '../index.js'
-import { createChecker, makeStore, reopen } from './harness.mjs'
+import { createChecker, makeStore, reopen, TEST_CONFIG } from './harness.mjs'
 
 const check = createChecker()
 const root = mkdtempSync(join(tmpdir(), 'memory-regression-'))
@@ -772,6 +773,223 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     // ledger/event telemetry is not part of an export row
     assert.equal('turns' in row, false)
     assert.equal('steps' in row, false)
+  })
+}
+
+// ------------------------------------------------------ private sensitivity
+
+{
+  const { store } = makeStore()
+  const privateRecord = await store.write({
+    scope: 'user',
+    kind: 'preference',
+    trigger: 'handling his personal photos',
+    claim: 'Never touch his personal photos or private messages without asking first.',
+    confidence: 0.9,
+    sensitivity: 'private',
+    origin: 'test',
+  })
+  await store.write({
+    scope: 'user',
+    kind: 'preference',
+    trigger: 'reviewing a pull request',
+    claim: 'Read the failing test before commenting on a pull request.',
+    confidence: 0.8,
+    sensitivity: 'public',
+    origin: 'test',
+  })
+
+  const autoPublic = store.recall({
+    query: 'personal photos and private messages',
+    gatePrivate: true,
+    visibility: 'public',
+    probeOnRecall: false,
+  })
+  check('a private record is withheld from automatic recall in a public session', () => {
+    assert.equal(autoPublic.items.length, 0)
+    assert.equal(autoPublic.gatedPrivate, 1)
+  })
+
+  const explicit = store.recall({
+    query: 'personal photos and private messages',
+    gatePrivate: false,
+    probeOnRecall: false,
+  })
+  check('an explicit recall still returns a private record, marked as private', () => {
+    assert.equal(explicit.items.length, 1)
+    assert.match(explicit.items[0].line, / private /)
+  })
+
+  const autoPrivate = store.recall({
+    query: 'personal photos and private messages',
+    gatePrivate: true,
+    visibility: 'private',
+    probeOnRecall: false,
+  })
+  check('a session declared private does receive it', () => {
+    assert.equal(autoPrivate.items.length, 1)
+    assert.equal(autoPrivate.gatedPrivate, 0)
+  })
+
+  check('session visibility is explicit and defaults to public', () => {
+    assert.equal(store.sessionVisibility('s1'), 'public')
+    store.setSessionVisibility('s1', 'private')
+    assert.equal(store.sessionVisibility('s1'), 'private')
+    store.setSessionVisibility('s1', 'public')
+    assert.equal(store.sessionVisibility('s1'), 'public')
+  })
+
+  check('config can declare a private session before it starts', () => {
+    const seeded = makeStore({ ...TEST_CONFIG, recall: { privateSessions: ['seed-session'] } })
+    assert.equal(seeded.store.sessionVisibility('seed-session'), 'private')
+    assert.equal(seeded.store.sessionVisibility('other'), 'public')
+  })
+
+  check('export carries the sensitivity marker', () => {
+    assert.equal(store.exportRow(privateRecord.record).sensitivity, 'private')
+  })
+
+  check('a public export omits private records and reports how many', () => {
+    const result = store.exportRecords({ includePrivate: false })
+    assert.equal(result.omitted, 1)
+    assert.equal(result.rows.some(record => record.id === privateRecord.record.id), false)
+  })
+}
+
+// -------------------------------------- legacy default, review, and precedence
+
+{
+  const { store } = makeStore()
+  await store.write({
+    scope: 'user',
+    kind: 'preference',
+    trigger: 'legacy personal habit',
+    claim: 'He prefers a quiet room when working late.',
+    origin: 'test',
+  })
+  const gated = store.recall({
+    query: 'prefers a quiet room when working late',
+    gatePrivate: true,
+    visibility: 'public',
+    probeOnRecall: false,
+  })
+  check('an unclassified personal preference is treated as private', () => {
+    assert.equal(gated.items.length, 0)
+    assert.equal(gated.gatedPrivate, 1)
+  })
+
+  await store.write({
+    scope: 'user',
+    kind: 'preference',
+    trigger: 'legacy personal habit',
+    claim: 'He prefers a quiet room when working late.',
+    sensitivity: 'public',
+    origin: 'test',
+  })
+  const reviewed = store.recall({
+    query: 'prefers a quiet room when working late',
+    gatePrivate: true,
+    visibility: 'public',
+    probeOnRecall: false,
+  })
+  check('an explicit public review makes a legacy preference shareable', () => {
+    assert.equal(reviewed.items.length, 1)
+  })
+
+  check('a public declaration beats a conflicting private one', () => {
+    const { store: scoped } = makeStore()
+    scoped.setSessionVisibility('channel-1', 'private')
+    assert.equal(scoped.sessionVisibility('channel-1'), 'private')
+    scoped.setSessionVisibility('channel-1', 'public')
+    assert.equal(scoped.sessionVisibility('channel-1'), 'public')
+    scoped.setSessionVisibility('channel-1', 'private')
+    assert.equal(scoped.sessionVisibility('channel-1'), 'public')
+  })
+}
+
+// --------------------------------------------------- private checkpoint keys
+
+{
+  const { store, domain } = makeStore()
+  const cwd = join(root, 'private-cwd')
+  mkdirSync(cwd, { recursive: true })
+  await store.checkpoint(cwd, {
+    milestone: 'private task state',
+    nextAction: 'continue privately',
+    sessionId: 'session-a',
+    private: true,
+  })
+
+  check('a private checkpoint is readable only by the session that wrote it', () => {
+    assert.equal(store.getCheckpoint(cwd, 'session-a')?.milestone, 'private task state')
+    assert.equal(store.getCheckpoint(cwd, 'session-b'), undefined)
+    assert.equal(store.getCheckpoint(cwd), undefined)
+  })
+
+  await store.checkpoint(cwd, { milestone: 'shared task state', sessionId: 'session-b' })
+  check('a shared checkpoint coexists with another session’s private one', () => {
+    assert.equal(store.getCheckpoint(cwd, 'session-b')?.milestone, 'shared task state')
+    assert.equal(store.getCheckpoint(cwd, 'session-a')?.milestone, 'private task state')
+  })
+
+  const legacyCwd = join(root, 'legacy-cwd')
+  mkdirSync(legacyCwd, { recursive: true })
+  await domain.table('tasks').put(safeKey(normalizeCwd(legacyCwd)), {
+    cwd: legacyCwd,
+    milestone: 'legacy state from before classification',
+    sessionId: 'old-session',
+    updatedAt: Date.now(),
+  })
+  check('a legacy checkpoint with unknown sensitivity is withheld from other sessions', () => {
+    assert.equal(store.getCheckpoint(legacyCwd, 'old-session')?.milestone, 'legacy state from before classification')
+    assert.equal(store.getCheckpoint(legacyCwd, 'new-session'), undefined)
+    assert.equal(store.hasWithheldCheckpoint(legacyCwd, 'new-session'), true)
+    assert.equal(store.hasWithheldCheckpoint(legacyCwd, 'old-session'), false)
+  })
+}
+
+// ---------------------------------------------- QQ bot visibility bridge
+
+{
+  const { store } = makeStore()
+  const prefs = {
+    sessionIds: {
+      'qqbot:10001:c2c:peer-a': 'session-aaa',
+      'qqbot:10001:group:group-b': 'session-bbb',
+      'some-other-plugin:10001:c2c:peer-c': 'session-ccc',
+      'qqbot:10001:c2c:': '',
+    },
+  }
+
+  check('the QQ prefs map turns c2c into private and group into public', () => {
+    const scopes = qqbotSessionScopes(prefs)
+    assert.equal(scopes.get('session-aaa'), 'private')
+    assert.equal(scopes.get('session-bbb'), 'public')
+    assert.equal(scopes.has('session-ccc'), false)
+    assert.equal(scopes.size, 2)
+  })
+
+  check('a missing or malformed prefs file is a no-op', () => {
+    assert.equal(readQqbotSessionScopes(join(root, 'no-such-prefs.json')).size, 0)
+    const broken = join(root, 'broken-prefs.json')
+    writeFileSync(broken, '{ not json')
+    assert.equal(readQqbotSessionScopes(broken).size, 0)
+  })
+
+  check('applying the map declares only the sessions it knows', () => {
+    const applied = applySessionScopes(store, qqbotSessionScopes(prefs))
+    assert.equal(applied, 2)
+    assert.equal(store.sessionVisibility('session-aaa'), 'private')
+    assert.equal(store.sessionVisibility('session-bbb'), 'public')
+    assert.equal(store.sessionVisibility('unknown-session'), 'public')
+  })
+
+  check('QQ session keys are parsed defensively', () => {
+    assert.equal(qqbotScopeOfSessionKey('qqbot:9:c2c:x'), 'private')
+    assert.equal(qqbotScopeOfSessionKey('qQbOt:9:GROUP:x'), 'public')
+    assert.equal(qqbotScopeOfSessionKey('qqbot:9:channel:x'), undefined)
+    assert.equal(qqbotScopeOfSessionKey(undefined), undefined)
+    assert.equal(qqbotScopeOfSessionKey(''), undefined)
   })
 }
 

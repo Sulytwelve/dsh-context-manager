@@ -359,6 +359,8 @@ async function distillWithModel(ctx, store, config, sample, level) {
         cwd: sample.cwd,
         origin: `distill:${level}`,
         sessionId: sample.sessionId,
+        // A candidate distilled from a private conversation stays private.
+        sensitivity: store.sessionVisibility(sample.sessionId) === 'private' ? 'private' : undefined,
         tags: ['distilled'],
       })
       written += 1
@@ -379,7 +381,7 @@ async function distillWithModel(ctx, store, config, sample, level) {
 /** Write the deterministic checkpoint for the finished turn. */
 async function writeCheckpoint(store, sample) {
   if (sample.cwd === undefined) return
-  const existing = store.getCheckpoint(sample.cwd)
+  const existing = store.getCheckpoint(sample.cwd, sample.sessionId)
   const guard = evaluateCheckpointGuard(existing, sample.sessionId, Date.now(), {
     curated: store.isCurated(sample.sessionId),
   })
@@ -395,6 +397,9 @@ async function writeCheckpoint(store, sample) {
   }
 
   const lastError = sample.errors.slice(-1)[0]
+  // A private conversation keeps its checkpoint to itself: otherwise the
+  // session-level state would leak through `resume` from another session.
+  const isPrivate = store.sessionVisibility(sample.sessionId) === 'private'
   await store.checkpoint(sample.cwd, {
     milestone: oneLine(sample.userTexts[0] ?? sample.lastAssistant, 240),
     nextAction: existing?.nextAction ?? (sample.successAfterError ? undefined : 'continue from the last verified step'),
@@ -403,6 +408,8 @@ async function writeCheckpoint(store, sample) {
       : `${lastError.name} failed (${lastError.code}): ${lastError.reason}`,
     sessionId: sample.sessionId,
     turn: sample.turn,
+    private: isPrivate ? true : undefined,
+    sensitivity: isPrivate ? 'private' : 'public',
   })
 }
 

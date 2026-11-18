@@ -34,6 +34,7 @@ await store.write({
   claim: 'Write commit messages in Chinese and keep them to one line.',
   evidence: 'explicit user instruction',
   confidence: 0.95,
+  sensitivity: 'public',
   origin: 'test',
 })
 await store.write({

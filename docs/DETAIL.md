@@ -130,7 +130,8 @@ One tool, `memory`, with operations:
 
 - `write` — persist one lesson: `kind`, `trigger`, `claim`, optional `evidence`,
   `confidence`, `tags`, and an optional `probe` (`path-exists` or
-  `file-contains`). `demote: true` lets that write lower an existing confidence.
+  `file-contains`). `demote: true` lets that write lower an existing confidence;
+  `sensitivity: "private"` keeps it out of automatic recall.
 - `recall` — explicit search over the store.
 - `checkpoint` / `resume` — save and read the task state for this directory.
 - `probe` / `feedback` / `forget` / `set_status` — maintain a record.
@@ -140,6 +141,67 @@ One tool, `memory`, with operations:
 - `status` — counters for this session and the store, the review hint, and a
   checkpoint left by another session.
 - `report` — the per-session token/call/latency ledger.
+
+## Private records
+
+`user` scope is global, so a preference recorded in a one-to-one conversation
+would otherwise be injected into any other conversation, including a shared one.
+The gate is fail-closed and structural rather than advisory:
+
+- `write` accepts `sensitivity: "private" | "public"` and stores it on the
+  record; sensitivity is independent of owner scope;
+- automatic recall drops private records unless the session is declared private
+  (`recall.gatePrivate`, default on), and counts them in the ledger;
+- an explicit `recall` obeys the same boundary: in a public conversation it
+  returns the suppressed count only, never ids, triggers, or text. The fix is to
+  switch the conversation to private, not to call the tool harder;
+- `export` likewise omits private rows outside a private conversation and
+  reports `privateOmitted`;
+- `status` reports session visibility, private-record count, records withheld in
+  this session, and whether a checkpoint was withheld — counts only;
+- `reviewGroups` (the duplicate hint) excludes private records in a public
+  session, so their ids and triggers do not reach a shared transcript;
+- a checkpoint written in a private session is stored under a session-specific
+  key; a checkpoint whose classification is unknown (written before this
+  release) is withheld as a whole from other sessions, because a task state is
+  not partially trustworthy.
+
+There is no host-side signal to infer "public conversation": `SessionHeader` has
+`cwd`, `parentSession`, `isSeeded`, `origin` (`subagent`), `delegationDepth`, and
+`agentPreset` — nothing about audience, and `CreateSessionOptions.meta` accepts
+no extra field. The declaration therefore has to come from outside: the row
+config (`recall.privateSessions` / `recall.publicSessions`) or the
+`memoryVisibility` service exposed for transport plugins. A public declaration
+wins over a conflicting private one, and unknown means public — the
+asymmetric-cost choice: withholding a private record from a shared conversation
+is cheap, leaking it is not. The tool has no operation to declare a conversation
+private: user or model text cannot widen its own audience.
+
+Migration defaults:
+
+| Record | Default treatment |
+|---|---|
+| `sensitivity: "private"` | withheld everywhere except private conversations |
+| `sensitivity: "public"` | shared |
+| no field, `scope: user`, `kind: preference` | **private until reviewed** |
+| no field, any other record | public |
+| checkpoint, no `sensitivity` field | **withheld from other sessions** |
+
+For `@tencent-connect/dsh-qqbot`, the scope is known internally
+(`ChatScope = 'c2c' | 'group'`) but is not exposed: no service is registered and
+session ids are random (`session-<uuid>`), so it cannot be read from the session
+id. The plugin does persist the mapping in `~/.dsh-qqbot/model-prefs.json`
+(`sessionIds: { "qqbot:<appId>:c2c:<peer>": "session-…" }`), and this plugin can
+read it once per new session — `recall.visibilityBridge: true` opts in; it is
+off by default because it reads another plugin's data file. The durable fix
+belongs in the transport — one call after the session is created or resumed:
+
+```js
+agent.ctx.get?.('memoryVisibility')?.set(sessionId, scope === 'c2c' ? 'private' : 'public')
+```
+
+That call also covers sessions that `/new` has since re-keyed, which the prefs
+file no longer lists.
 
 ## Export and import
 

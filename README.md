@@ -272,9 +272,58 @@ differently because of it. It appears only when you ask for `status`.
 // read-only JSONL of the store, one page at a time
 {"op":"export","status":"active","limit":100,"offset":0}
 
+// personal content: only visible in a private conversation
+{"op":"write","kind":"preference","scope":"user","sensitivity":"private",
+ "trigger":"handling his personal photos",
+ "claim":"Never touch his personal photos without asking first."}
+
 // measurement
 {"op":"report"}
 ```
+
+## Private records
+
+The audience gate is fail-closed. A record with `sensitivity: "private"` is
+withheld from automatic recall **and** from an explicit `recall` in a public
+conversation: the tool reports only how many were withheld, never their ids,
+triggers, or text. Viewing private content requires switching that conversation
+to private; the lookup tool cannot declare a conversation private.
+
+DSH exposes no "group conversation" metadata (`SessionHeader` carries cwd,
+parent, origin, and preset, nothing about audience), so this plugin cannot infer
+it. A session is treated as **public unless declared otherwise**, because leaking
+a private preference into a shared conversation costs far more than withholding
+it. Declare a private session with:
+
+- `recall.privateSessions: [sessionId, …]` in the row config, or
+- the `memoryVisibility` service (`ctx.get('memoryVisibility').set(sessionId,
+  'private')`) from a transport that knows the difference — the natural hook for
+  a chat plugin.
+
+A **public declaration wins** over a conflicting private one
+(`recall.publicSessions`, or `set(sessionId, 'public')`), and every check that
+cannot see a declaration treats the session as public.
+
+Two migration defaults make existing data safe:
+
+- an unclassified record where `scope: "user"` and `kind: "preference"` is
+  treated as private until reviewed; write it again with
+  `sensitivity: "public"` to release it;
+- a checkpoint with no `sensitivity` field (written before this release) is
+  **withheld as a whole** from other sessions, because a mixed/unknown task
+  state cannot be partially trusted. `status` reports the withheld count.
+
+For the QQ bot plugin (`@tencent-connect/dsh-qqbot`) the bridge is available but
+**off by default** — it reads another plugin's data file, so the operator opts
+in with `recall.visibilityBridge: true` (or `recall.visibilityBridgePath` to
+relocate the file). When enabled it declares c2c sessions private and group
+sessions public from `~/.dsh-qqbot/model-prefs.json`; a missing or malformed
+file means "public". The durable alternative is the transport calling
+`memoryVisibility` itself.
+
+`status` reports the session's visibility, how many private records exist, how
+many were withheld from recall in this session, and whether a checkpoint was
+withheld — counts only, never private content.
 
 ## Configuration
 
@@ -363,7 +412,7 @@ control design, the invalid runs, and the caveats.
 
 ```bash
 node test/smoke.mjs        # 18 store-level checks, no DSH required
-node test/regression.mjs   # 44 isolation / probe / evidence regression checks
+node test/regression.mjs   # 64 isolation / probe / evidence / privacy regression checks
 node bench/setup.mjs       # build the benchmark fixture
 node bench/analyze.mjs <session.v4.jsonl.zstd>   # per-session calls/tokens/wall
 node bench/score.mjs "$DSH_HOME/storages/agent_memory" "<query>" --cwd <dir>
