@@ -532,11 +532,10 @@ node bench/score.mjs "$DSH_HOME/storages/agent_memory" "<query>" --cwd <dir>
 node bench/packet.mjs "$DSH_HOME/storages/agent_memory" "<query>" --cwd <dir>
 ```
 
-GitHub Actions runs the suites on every push and pull request (Node 20/22/24)
-and repeats them from the packed tarball in a clean directory
-(`.github/workflows/test.yml`), so the counts above are checked rather than
-remembered. The suites validate storage keys and the domain schemas the way the
-JSON backend does; a full real-DSH host run is still manual.
+The suites are run locally before a release (`npm test`); this repository does
+not use hosted CI workflows. They validate storage keys and the domain schemas
+the way the JSON backend does, and `test/tool.mjs` exercises the registered tool
+through a minimal host.
 
 `bench/score.mjs` prints every candidate's trigger-coverage breakdown against the
 real records in a live store — use it to tune `minRelevance` for your vocabulary.
