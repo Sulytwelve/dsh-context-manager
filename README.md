@@ -233,8 +233,15 @@ directory, `status` names that checkpoint instead of losing it silently.
 ## The tool
 
 One tool, `memory`, with operations `recall`, `write`, `forget`, `status`,
-`report`, `checkpoint`, `resume`, `probe`, `feedback`, `set_status`,
+`report`, `export`, `checkpoint`, `resume`, `probe`, `feedback`, `set_status`,
 `set_confidence`.
+
+`export` prints JSONL — a header line, then one line per record — sorted by
+owner, dedupe key, and id so two exports of an unchanged store are identical
+apart from timestamps. It is read-only and paginated (`owner`, `scope`, `status`,
+`limit`, `offset`, default page of 100). Each record line carries its `id` and
+`dedupeKey`, which is what a future import would map on; ledger and event rows
+are local telemetry and are not exported.
 
 `status` also carries a read-only review hint: when the same scope and the same
 trigger hold more than one `active` record, it lists the group and its ids. That
@@ -261,6 +268,9 @@ differently because of it. It appears only when you ask for `status`.
 
 // counters for this session and the store (includes the review hint)
 {"op":"status"}
+
+// read-only JSONL of the store, one page at a time
+{"op":"export","status":"active","limit":100,"offset":0}
 
 // measurement
 {"op":"report"}

@@ -697,6 +697,84 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
   })
 }
 
+// ---------------------------------------------------------- read-only export
+
+{
+  const { store } = makeStore()
+  const first = await store.write({
+    scope: 'project',
+    kind: 'procedure',
+    trigger: 'exporting the fixture project',
+    claim: 'Run node scripts/export.mjs to produce the fixture bundle.',
+    evidence: 'scripts/export.mjs',
+    confidence: 0.9,
+    tags: ['export', 'fixtures'],
+    cwd: projectA,
+    origin: 'test',
+  })
+  await store.write({
+    scope: 'project',
+    kind: 'fact',
+    trigger: 'exporting the fixture project',
+    claim: 'The fixture bundle is written under build/fixtures only.',
+    evidence: 'build/README.md',
+    confidence: 0.6,
+    status: 'proposed',
+    cwd: projectA,
+    origin: 'test',
+  })
+  await store.write({
+    scope: 'user',
+    kind: 'preference',
+    trigger: 'reading long diffs',
+    claim: 'Long diffs should be read with the whitespace-ignoring flag first.',
+    evidence: 'user note',
+    confidence: 0.8,
+    origin: 'test',
+  })
+
+  check('export reports the total and pages without gaps or overlaps', () => {
+    const all = store.exportRecords({})
+    assert.equal(all.total, 3)
+    assert.equal(all.rows.length, 3)
+    const paged = [
+      ...store.exportRecords({ limit: 2 }).rows,
+      ...store.exportRecords({ limit: 2, offset: 2 }).rows,
+    ].map(record => record.id)
+    assert.equal(new Set(paged).size, 3)
+    assert.deepEqual(paged, all.rows.map(record => record.id))
+  })
+
+  check('export is stable across calls and filters by owner, scope and status', () => {
+    const firstIds = store.exportRecords({}).rows.map(record => record.id)
+    const secondIds = store.exportRecords({}).rows.map(record => record.id)
+    assert.deepEqual(firstIds, secondIds)
+    assert.equal(store.exportRecords({ scope: 'user' }).total, 1)
+    assert.equal(store.exportRecords({ status: 'proposed' }).total, 1)
+    assert.equal(store.exportRecords({ owner: ownerFor('project', projectA) }).total, 2)
+  })
+
+  check('an export row carries the identity an import needs', () => {
+    const row = store.exportRow(first.record)
+    assert.equal(row.format, 1)
+    assert.equal(row.type, 'memory')
+    assert.equal(row.id, first.record.id)
+    assert.equal(row.dedupeKey, first.record.key)
+    assert.equal(row.owner, ownerFor('project', projectA))
+    assert.equal(row.scope, 'project')
+    assert.equal(row.kind, 'procedure')
+    assert.equal(row.trigger, 'exporting the fixture project')
+    assert.equal(row.status, 'active')
+    assert.equal(row.confidence, 0.9)
+    assert.deepEqual(row.tags, ['export', 'fixtures'])
+    assert.equal(Object.values(row).includes(undefined), false)
+    assert.deepEqual(JSON.parse(JSON.stringify(row)), row)
+    // ledger/event telemetry is not part of an export row
+    assert.equal('turns' in row, false)
+    assert.equal('steps' in row, false)
+  })
+}
+
 // ---------------------------------------------------------------- config gate
 
 check('recall.enabled: false really disables the recall listener', () => {

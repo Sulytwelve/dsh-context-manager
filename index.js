@@ -9,7 +9,7 @@
 
 import { checkContract } from './lib/contract.js'
 import { DOMAIN_SPEC } from './lib/domain.js'
-import { createStore, shortId } from './lib/store.js'
+import { EXPORT_FORMAT, createStore, shortId } from './lib/store.js'
 import {
   age, claimedUserText, clip, contextMessage, estimateTokens, nowMs, oneLine, runProbe, similarity,
 } from './lib/util.js'
@@ -96,11 +96,13 @@ const PARAMETERS = {
   properties: {
     op: {
       type: 'string',
-      enum: ['recall', 'write', 'forget', 'status', 'report', 'checkpoint', 'resume', 'probe', 'feedback', 'set_status', 'set_confidence'],
-      description: 'recall|write|forget|status|report|checkpoint|resume|probe|feedback|set_status|set_confidence',
+      enum: ['recall', 'write', 'forget', 'status', 'report', 'export', 'checkpoint', 'resume', 'probe', 'feedback', 'set_status', 'set_confidence'],
+      description: 'recall|write|forget|status|report|export|checkpoint|resume|probe|feedback|set_status|set_confidence',
     },
     query: { type: 'string', description: 'Recall query.' },
-    limit: { type: 'integer', description: 'Max records (default 5).' },
+    limit: { type: 'integer', description: 'Max records (default 5; export default 100).' },
+    offset: { type: 'integer', description: 'Export: skip this many rows.' },
+    owner: { type: 'string', description: 'Export: filter by owner string.' },
     id: { type: 'string', description: 'Record id; a short suffix is accepted.' },
     scope: { type: 'string', enum: ['user', 'project', 'session'], description: 'Default: project.' },
     kind: { type: 'string', enum: ['preference', 'procedure', 'fact', 'decision', 'pitfall', 'hypothesis'] },
@@ -349,6 +351,29 @@ function memoryTool(ctx, store, config) {
           lines.push(`total: sessions ${rows.length}, steps ${totals.steps}, tok ${totals.input}/${totals.output}, `
             + `injections ${totals.injections} (${totals.injectionTokens}tok), distill ${totals.distillCalls} (${totals.distillTokens}tok)`)
           return { ok: true, text: lines.join('\n') }
+        }
+        case 'export': {
+          // Read-only, JSONL, paginated. Deliberately no ledger or events: they
+          // are local telemetry and would only add noise to a migration.
+          const result = store.exportRecords({
+            status: typeof args.status === 'string' ? args.status : undefined,
+            scope: typeof args.scope === 'string' ? args.scope : undefined,
+            owner: typeof args.owner === 'string' ? args.owner : undefined,
+            limit: args.limit,
+            offset: args.offset,
+          })
+          const header = {
+            type: 'export',
+            format: EXPORT_FORMAT,
+            generatedAt: new Date().toISOString(),
+            total: result.total,
+            offset: result.offset,
+            limit: result.limit,
+            exported: result.rows.length,
+          }
+          const rows = result.rows.map(record => JSON.stringify(store.exportRow(record)))
+          await store.event('export', `${result.rows.length}/${result.total} record(s) at offset ${result.offset}`, sessionId)
+          return { ok: true, text: [JSON.stringify(header), ...rows].join('\n') }
         }
         default:
           throw new Error(`unsupported op "${String(args.op)}"`)

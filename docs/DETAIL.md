@@ -136,9 +136,30 @@ One tool, `memory`, with operations:
 - `probe` / `feedback` / `forget` / `set_status` — maintain a record.
 - `set_confidence` — lower (or raise) one record's confidence without rewriting
   its claim, for an over-confident import or a stale snapshot.
+- `export` — read-only JSONL of the store, one page at a time.
 - `status` — counters for this session and the store, the review hint, and a
   checkpoint left by another session.
 - `report` — the per-session token/call/latency ledger.
+
+## Export and import
+
+`export` is read-only and prints JSONL: one header line (`type: "export"`,
+`format: 1`, `total`, `offset`, `limit`, `exported`) then one line per record
+(`type: "memory"`, `format: 1`, `id`, `dedupeKey`, `owner`, `scope`, `kind`,
+`trigger`, `claim`, `evidence`, `confidence`, `status`, `probe`, `tags`, and the
+timestamps). Rows are sorted by owner, dedupe key, and id, so two exports of an
+unchanged store differ only in `generatedAt`. Filters are `owner`, `scope`,
+`status`, `limit` (default 100, capped at 500), and `offset`. The ledger and
+event tables are intentionally excluded: they are local telemetry, not memory.
+
+Import is **not implemented**. The constraint that shapes it is that write-time
+dedupe is derived from `owner + trigger + claim`, so re-running `write` for an
+imported row can merge two records that carry different ids and can silently
+pick a different winner. A future importer therefore has to use the exported
+`dedupeKey` to map rows back to their original record instead of relying on
+claim similarity; on a conflict the newer `updatedAt` wins, and it must never
+demote `confidence` or `status` as a side effect of importing. Keeping the
+`dedupeKey` in every export line is what makes that mapping possible.
 
 ## Tuning retrieval
 
