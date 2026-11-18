@@ -290,7 +290,7 @@ function memoryTool(ctx, store, config) {
           return {
             ok: true,
             text: `${result.created ? 'stored' : 'updated'} ${result.record.id} (${result.record.kind}, ${result.record.scope}, confidence ${result.record.confidence.toFixed(2)})`
-              + ' a private record is only visible in a private conversation.',
+              + (isPrivateRecord(result.record) ? ' — private: visible only in a private conversation.' : ''),
           }
         }
         case 'forget': {
