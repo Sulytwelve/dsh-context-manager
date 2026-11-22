@@ -117,8 +117,8 @@ const PARAMETERS = {
   properties: {
     op: {
       type: 'string',
-      enum: ['recall', 'write', 'forget', 'status', 'report', 'export', 'import', 'checkpoint', 'resume', 'probe', 'feedback', 'set_status', 'set_confidence'],
-      description: 'recall|write|forget|status|report|export|import|checkpoint|resume|probe|feedback|set_status|set_confidence',
+      enum: ['recall', 'write', 'forget', 'status', 'report', 'export', 'import', 'checkpoint', 'resume', 'probe', 'feedback', 'set_status', 'set_confidence', 'link'],
+      description: 'recall|write|forget|status|report|export|import|checkpoint|resume|probe|feedback|set_status|set_confidence|link',
     },
     query: { type: 'string', description: 'Recall query.' },
     limit: { type: 'integer', description: 'Max records (default 5; export default 100).' },
@@ -141,6 +141,17 @@ const PARAMETERS = {
       description: 'write: "private" keeps the record out of public conversations; "public" reviews a legacy personal preference as shareable.',
     },
     tags: { type: 'array', items: { type: 'string' }, description: 'Extra retrieval terms.' },
+    aliases: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'write: extra retrieval aliases — other short wordings for when this applies (merged, never replaced).',
+    },
+    forms: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'link: 2+ surface forms that always mean the same thing (one Latin word or a CJK phrase each); learned store-wide.',
+    },
+    remove: { type: 'boolean', description: 'link: remove the learned group(s) holding these forms instead of adding.' },
     probe: {
       type: 'object',
       additionalProperties: false,
@@ -269,7 +280,8 @@ function memoryTool(ctx, store, config) {
   return {
     name: 'memory',
     description: 'Cross-session memory: recall prior records before re-deriving a fact; write one durable lesson '
-      + 'when it will recur; checkpoint the task so a later session can resume.',
+      + 'when it will recur; link surface forms that mean the same thing so recall matches any wording; '
+      + 'checkpoint the task so a later session can resume.',
     parameters: PARAMETERS,
     output: {
       schema: OUTPUT_SCHEMA,
@@ -341,6 +353,7 @@ function memoryTool(ctx, store, config) {
             evidence: args.evidence,
             confidence: args.confidence,
             tags: args.tags,
+            aliases: args.aliases,
             probe,
             supersedes: args.supersedes,
             status: args.status === 'proposed' ? 'proposed' : undefined,
@@ -399,6 +412,30 @@ function memoryTool(ctx, store, config) {
           const record = await store.feedback(found.id, args.useful !== false)
           return { ok: true, text: `${record.id} feedback recorded (wins ${record.wins}, harms ${record.harms})` }
         }
+        case 'link': {
+          if (!Array.isArray(args.forms) || args.forms.length === 0) throw new Error('"forms" is required for link')
+          if (args.remove === true) {
+            const removed = await store.removeConcepts(args.forms)
+            return {
+              ok: true,
+              text: removed > 0
+                ? `removed ${removed} learned concept group(s)`
+                : 'no learned concept group holds any of these forms',
+            }
+          }
+          const group = await store.linkForms({ forms: args.forms, origin: 'model' })
+          await store.event(
+            'link',
+            `concept group ${group.forms.length} form(s): ${group.forms.slice(0, 6).join(' = ')}`,
+            sessionId,
+            { private: store.sessionVisibility(sessionId) === 'private' },
+          )
+          return {
+            ok: true,
+            text: `learned concept group of ${group.forms.length} form(s): ${group.forms.join(' = ')}`
+              + ' — recall now matches these forms interchangeably.',
+          }
+        }
         case 'checkpoint': {
           // A private conversation keeps its checkpoint to itself: same rule as
           // a private record, so the task state cannot leak through `resume`.
@@ -435,12 +472,15 @@ function memoryTool(ctx, store, config) {
           const visibility = store.sessionVisibility(sessionId)
           const privateCount = store.list({ limit: 100_000 }).filter(record => isPrivateRecord(record)).length
           const lines = [
-            `memories ${stats.memories} (active ${stats.byStatus.active}, stale ${stats.byStatus.stale}, superseded ${stats.byStatus.superseded}, proposed ${stats.byStatus.proposed}) | checkpoints ${stats.checkpoints} | sessions ${stats.sessions}`,
+            `memories ${stats.memories} (active ${stats.byStatus.active}, stale ${stats.byStatus.stale}, superseded ${stats.byStatus.superseded}, proposed ${stats.byStatus.proposed})`
+              + ` | checkpoints ${stats.checkpoints} | learned concepts ${stats.concepts} group(s), ${stats.aliased} aliased record(s)`
+              + ` | sessions ${stats.sessions}`,
             `this session: turns ${ledger.turns}, steps ${ledger.steps}, model tokens in/out ${ledger.inputTokens}/${ledger.outputTokens}, `
               + `injections ${ledger.injections} (${ledger.injectionTokens} tok, ${ledger.injectionMs.toFixed(1)}ms), `
               + `recall ${ledger.recallCandidates} candidates / ${ledger.recallRejected} rejected, `
               + `probes ${ledger.probeRuns}/${ledger.probeFails} failed, ${ledger.probeSkipped ?? 0} skipped-when-due, ${ledger.probeInconclusive ?? 0} inconclusive, `
-              + `distill calls ${ledger.distillCalls} (${ledger.distillInputTokens}/${ledger.distillOutputTokens} tok)`,
+              + `distill ${ledger.distillCalls} (${ledger.distillInputTokens}/${ledger.distillOutputTokens} tok), `
+              + `enrich ${ledger.enrichCalls ?? 0} (${ledger.enrichInputTokens ?? 0}/${ledger.enrichOutputTokens ?? 0} tok)`,
             // Counts only: a public transcript must not learn ids, triggers, or
             // excerpts of withheld records.
             `privacy: this session is ${visibility}, ${privateCount} private record(s), ${ledger.gatedPrivate ?? 0} withheld from recall in this session, ${store.hasWithheldCheckpoint(cwd, sessionId) ? 1 : 0} withheld checkpoint(s)`,
@@ -498,6 +538,23 @@ function memoryTool(ctx, store, config) {
             offset: args.offset,
             includePrivate: visibility === 'private',
           })
+          // Learned synonym groups are store-wide retrieval vocabulary, not
+          // records of one owner: they travel with an operator-wide migration
+          // (`all: true`) or a private export, and a default public export
+          // reports how many were left out instead of leaking them.
+          const allConcepts = store.exportConcepts()
+          const includeConcepts = all || visibility === 'private'
+          const conceptRows = includeConcepts
+            ? allConcepts.map(group => JSON.stringify({
+              type: 'concept',
+              format: EXPORT_FORMAT,
+              id: group.id,
+              forms: group.forms,
+              origin: group.origin,
+              createdAt: group.createdAt,
+              updatedAt: group.updatedAt,
+            }))
+            : []
           const header = {
             type: 'export',
             format: EXPORT_FORMAT,
@@ -507,10 +564,11 @@ function memoryTool(ctx, store, config) {
             limit: result.limit,
             exported: result.rows.length,
             privateOmitted: result.omitted,
+            ...(includeConcepts || allConcepts.length === 0 ? {} : { conceptsOmitted: allConcepts.length }),
           }
           const rows = result.rows.map(record => JSON.stringify(store.exportRow(record)))
-          await store.event('export', `${result.rows.length}/${result.total} record(s) at offset ${result.offset}`, sessionId, { private: false })
-          return { ok: true, text: [JSON.stringify(header), ...rows].join('\n') }
+          await store.event('export', `${result.rows.length}/${result.total} record(s) at offset ${result.offset}${conceptRows.length > 0 ? ` + ${conceptRows.length} concept group(s)` : ''}`, sessionId, { private: false })
+          return { ok: true, text: [JSON.stringify(header), ...rows, ...conceptRows].join('\n') }
         }
         case 'import': {
           const inline = typeof args.payload === 'string' ? args.payload : undefined
@@ -558,7 +616,7 @@ function memoryTool(ctx, store, config) {
           const summary = await store.importRows(rows)
           await store.event(
             'import',
-            `${summary.inserted} new, ${summary.updated} updated, ${summary.skipped} unchanged, ${summary.rejected} rejected`,
+            `${summary.inserted} new, ${summary.updated} updated, ${summary.skipped} unchanged, ${summary.linked} concept group(s), ${summary.rejected} rejected`,
             sessionId,
             { private: false },
           )
@@ -567,7 +625,7 @@ function memoryTool(ctx, store, config) {
             : ''
           return {
             ok: true,
-            text: `import: ${summary.inserted} new, ${summary.updated} updated, ${summary.skipped} unchanged, ${summary.rejected} rejected${skipped}`,
+            text: `import: ${summary.inserted} new, ${summary.updated} updated, ${summary.skipped} unchanged, ${summary.linked} concept group(s) linked, ${summary.rejected} rejected${skipped}`,
           }
         }
         default:

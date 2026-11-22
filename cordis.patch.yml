@@ -36,6 +36,15 @@
           deepMaxTokens: 1400
           minIntervalMs: 120000
           maxCandidates: 2
+          # Failure-driven alias/synonym enrichment after a zero-hit recall.
+          # Set enrich: false for a distillation-only row.
+          enrich: true
+          enrichMaxPerSession: 4
+          enrichMaxPerDay: 6
+          enrichMinIntervalMs: 45000
+          enrichMaxTokens: 500
+          enrichMaxRecords: 2
+          enrichTtlMs: 604800000
     - id: memory-probe
       name: '@sulytwelve/dsh-context-manager/probe'
       config:

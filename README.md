@@ -15,11 +15,18 @@ Migrating an install of the old `@sulytwelve/dsh-memory-astra62` package:
 `remove_bundle` it, then `install_bundle` the new name — stored records live in
 the unchanged `agent_memory` domain, so nothing is lost.
 
-- **No embeddings, no vector database.** Retrieval scores the record's *trigger*
-  — the situation it claims to apply to — against the current prompt using
-  idf-weighted trigger coverage over Latin words and CJK bigrams. The claim only
-  adds supporting vocabulary, so a precise trigger is not diluted by a long
-  explanation.
+- **Semantic recall without a vector database.** Retrieval still scores
+  idf-weighted trigger coverage, but the vocabulary is no longer only
+  literal. Latin words fold to a shared base form (`backups` → `backup`),
+  records carry agent-written retrieval aliases (matched at a lower weight
+  than the literal trigger), and a **learned concept dictionary** connects
+  wordings that mean the same thing (`密码库` = `vaultwarden`). Nothing
+  semantic is hardcoded: the dictionary starts empty and is written at
+  runtime by the agent — explicitly with `memory{op:"link"}`, automatically by
+  the failure-driven enrichment — and it is inspectable and editable. The
+  claim only adds supporting vocabulary, so a precise trigger is not diluted
+  by a long explanation. `docs/SEMANTIC-RETRIEVAL.md` has the design and the
+  reserved vector-tier seam.
 - **Scoped by construction.** Every record has one owner — global `user`, one
   normalized `project` directory, or one `session` id — and dedupe, index
   rebuild, and recall all use that same identity. Two projects recording the
@@ -41,7 +48,7 @@ the unchanged `agent_memory` domain, so nothing is lost.
 | Row id | Module | Model calls | Cost |
 |---|---|---|---|
 | `memory-core` | `@sulytwelve/dsh-context-manager` | none | One scoring pass per turn start; a few small file writes |
-| `memory-distill` | `…/distill` | at most **one** call per qualifying turn (writes 0–2 records), **on in the shipped bundle patch** | One bounded background request, after the turn already closed |
+| `memory-distill` | `…/distill` | at most **one** call per qualifying turn (writes 0–2 records), **on in the shipped bundle patch**; plus at most one failure-driven enrich call after a zero-hit recall | One bounded background request per qualifying turn, plus one only after recall actually missed; both after the turn already closed |
 | `memory-probe` | `…/probe` | none | A periodic `stat` / substring check of at most 40 records |
 
 `memory-distill` ships enabled because a memory system that never learns
@@ -59,9 +66,12 @@ tool schema is about 540 tokens in every request while `memory-core` is enabled
 (cached after the first request). Recall and probes never call a model.
 `memory-distill` is the only model caller and ships on: each qualifying turn may
 spend **one** bounded request (at most 2 records per turn, 2 calls per session,
-12 per day, one per 2-minute cooldown). For a **zero-extra-model-request**
-install, set `llm.enabled: false` in the `memory-distill` row config before the
-first session — recall, probes, and turn-end checkpoints keep working.
+12 per day, one per 2-minute cooldown), and after a recall that produced zero
+hits it may spend **one** small enrichment request (own caps: 4 per session,
+6 per day, 45 s cooldown) that writes retrieval aliases and synonym groups. For
+a **zero-extra-model-request** install, set `llm.enabled: false` in the
+`memory-distill` row config before the first session — recall, probes, and
+turn-end checkpoints keep working.
 
 The bundle can be installed by the agent that is already running, from a local
 folder, a GitHub repository, or a published package. All three paths end in the
@@ -248,15 +258,20 @@ Release history: CHANGELOG.md.
 
 One tool, `memory`, with operations `recall`, `write`, `forget`, `status`,
 `report`, `export`, `import`, `checkpoint`, `resume`, `probe`, `feedback`,
-`set_status`, `set_confidence`.
+`set_status`, `set_confidence`, `link`.
 
 `export` prints JSONL — a header line, then one line per record — sorted by
 owner, dedupe key, and id so two exports of an unchanged store are identical
 apart from timestamps. It is read-only and paginated (`owner`, `scope`, `status`,
 `limit`, `offset`, default page of 100). Each record line carries its `id` and
-`dedupeKey`. This is a **snapshot of the memory records**, not a complete backup
-of the plugin's data: checkpoints, the ledger, and the event ring are not
-exported. For a full-domain backup, stop DSH and copy
+`dedupeKey`, and records with retrieval aliases carry them too. The learned
+concept dictionary rides along as `type: "concept"` rows on the operator-wide
+path (`all: true`) or from a private conversation; a default public export
+leaves it out and reports `conceptsOmitted`, because a learned group can name
+things a shared transcript should not see. This is a **snapshot of the memory
+records plus the learned dictionary**, not a complete backup of the plugin's
+data: checkpoints, the ledger, and the event ring are not exported. For a
+full-domain backup, stop DSH and copy
 `$DSH_HOME/storages/agent_memory/` (see **Backup and restore** below).
 
 By default an export is scoped to the calling session's owners (its `user`
@@ -337,6 +352,12 @@ differently because of it. It appears only when you ask for `status`.
 {"op":"write","kind":"preference","scope":"user","sensitivity":"private",
  "trigger":"handling his personal photos",
  "claim":"Never touch his personal photos without asking first."}
+
+// teach the dictionary: these forms always mean the same thing
+{"op":"link","forms":["密码库","vaultwarden","bitwarden"]}
+
+// remove a learned group that turned out wrong
+{"op":"link","forms":["vaultwarden"],"remove":true}
 
 // measurement
 {"op":"report"}
@@ -421,6 +442,8 @@ Every row reads its `config` from the patch layer. The defaults live in
       threshold: 4           # turn-score needed before spending one call
       maxCallsPerSession: 2
       maxCallsPerDay: 12
+      enrich: true           # zero-hit recall -> one bounded alias/synonym call
+      enrichMaxPerDay: 6     # its own caps; a record enriched once rests 7 days
 - id: memory-probe
   config:
     intervalMs: 900000       # sweep cadence
@@ -498,8 +521,13 @@ Two different operations:
   `storage-domain` form mounted (all in the shipped `dsh-base` profile).
   Verified: Windows 11 + DSH `0.2.2-rc.5` (this release's suites on Node 24) and
   a Linux host (review) on Node 20.20.2 / 24.22.1. macOS is untested.
-- Retrieval is lexical. A record whose vocabulary does not overlap the user's
-  wording will not surface; write triggers in the words you would use to ask.
+- Retrieval is lexical **plus learned semantics**. A record whose wording does
+  not overlap the question still misses its *first* recall — that miss is
+  exactly what the failure-driven enrichment learns from (aliases for the
+  record, synonym groups store-wide), so the same wording matches from then
+  on. With the model call off, the dictionary is whatever the agent wrote
+  through `link` and `write{aliases}`. A query can be reworded limitlessly;
+  the fix accumulates only where recall actually failed.
 - Recall does no I/O **unless a probe is due or the QQ bridge is enabled**. A due
   probe reads the target file asynchronously, bounded by `probeMaxBytes`, so a
   slow network filesystem delays that recall but does not block other sessions.
@@ -522,8 +550,8 @@ Two different operations:
 ```bash
 npm test                    # the three shipped suites
 node test/smoke.mjs         # 18 store-level checks, no DSH required
-node test/regression.mjs    # 104 isolation / probe / budget / privacy / import checks
-node test/tool.mjs          # 10 tool-entry checks against a minimal fake Host
+node test/regression.mjs    # 132 isolation / probe / budget / privacy / import / semantic checks
+node test/tool.mjs          # 13 tool-entry checks against a minimal fake Host
 
 # Benchmarks are source-checkout only (not shipped in the npm package):
 node bench/setup.mjs        # build the benchmark fixture
@@ -568,6 +596,7 @@ BSD-2-Clause. Copyright (c) 2026, Sulytwelve.
 实际路径以运行中的 profile 为准：`$env:DSH_HOME`、`$env:DSH_PROFILE`、`$env:DSH_PROFILE_DIR`、`$env:DSH_INSTALL_DIR`（桌面版指向 `app.asar` 内部）。注意：**不同 profile 是各自独立的安装**，但 `storages/agent_memory/` 是共享的；换桌面版安装目录不影响插件与数据；卸载桌面版不会删除 `$DSH_HOME`。
 
 - 想让记忆更积极：把 `memory-core` 的 `recall.minRelevance` 调低（例如 2.0）。
-- 想完全关掉后台模型调用：把 `memory-distill` 的 `llm.enabled` 设为 `false`。
+- **语义召回**：`{"op":"link","forms":["密码库","vaultwarden","bitwarden"]}` 声明同义词组——词典由 Agent 在运行时写入，插件**不带任何内置词表**；某次 recall 零命中时，`memory-distill` 会花一次有界模型调用自动为没召回的记录补别名、为整个库补同义组（`llm.enrich`，默认开；设 `false` 关闭）。同一说法失败一次、学一次、永久生效。设计细节与预留的向量接口见 `docs/SEMANTIC-RETRIEVAL.md`。
+- 想完全关掉后台模型调用：把 `memory-distill` 的 `llm.enabled` 设为 `false`（此时词典只能靠会话里的 `link`/`write` 主动写）。
 - 想整体停用：逐个关闭三行，或 `remove_bundle`；数据保留在 `$DSH_HOME/storages/agent_memory/`。
 - 查看**当前会话**的计数与状态：`{"op":"status"}`。`{"op":"report"}` 汇总的是最近最多 40 条**已持久化的会话账本**（含历史会话），不是只统计本次会话。

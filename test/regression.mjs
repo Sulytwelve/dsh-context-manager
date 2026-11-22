@@ -13,9 +13,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { evaluateDistillBudget, reserveDistillBudget, summarizeDistillLedger } from '../lib/budget.js'
+import { dayOf, evaluateEnrichBudget, reserveEnrichBudget, summarizeEnrichLedger } from '../lib/budget.js'
 import { evaluateCheckpointGuard } from '../lib/checkpoint-guard.js'
 import { checkContract } from '../lib/contract.js'
 import { openDomainWithRetry } from '../lib/domain-open.js'
+import { buildEnrichPrompt, enrichAfterFailure, parseEnrichResult } from '../lib/enrich.js'
+import { stemLatin } from '../lib/lexicon.js'
 import { applySessionScopes, bridgeStamp, qqbotScopeOfSessionKey, qqbotSessionScopes, readQqbotSessionScopes } from '../lib/visibility-bridge.js'
 import { normalizeCwdOn, estimateTokens, runProbe, safeKey, normalizeCwd } from '../lib/util.js'
 import { ownerFor } from '../lib/store.js'
@@ -1509,6 +1512,423 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.match(record.claim, /newer claim/)
     assert.equal(record.probe, undefined)
     assert.equal(record.lastCheckedAt, undefined)
+  })
+}
+
+// ------------------------------------------------------ semantic retrieval
+//
+// The retrieval vocabulary is not built into the package: the agent writes it
+// at runtime. These blocks pin the three layers — generic Latin stem folding,
+// the learned concept dictionary (`link` / enrichment), and per-record
+// aliases — plus the failure-driven call that fills the layers.
+
+{
+  const { store } = makeStore()
+
+  check('latin stems fold to a shared base form', () => {
+    assert.equal(stemLatin('backups'), 'backup')
+    assert.equal(stemLatin('restarting'), 'restart')
+    assert.equal(stemLatin('running'), 'run')
+    assert.equal(stemLatin('stopped'), 'stop')
+    assert.equal(stemLatin('proxies'), 'proxy')
+    assert.equal(stemLatin('notes'), 'note')
+    assert.equal(stemLatin('classes'), 'class')
+    // Words the rules must leave alone.
+    assert.equal(stemLatin('status'), 'status')
+    assert.equal(stemLatin('alias'), 'alias')
+    assert.equal(stemLatin('dns'), 'dns')
+  })
+
+  await check('an inflected query matches the base form on the record', async () => {
+    await store.write({
+      scope: 'project', kind: 'fact',
+      trigger: 'vaultwarden backups are encrypted',
+      claim: 'The backup job encrypts every archive before upload.',
+      confidence: 0.9,
+      cwd: projectA, origin: 'test',
+    })
+    const result = await store.recall({ query: 'how to restore a backup', cwd: projectA })
+    assert.ok(result.items.length >= 1)
+    assert.match(result.items[0].record.trigger, /vaultwarden/)
+  })
+
+  check('link rejects a single form', async () => {
+    let failure
+    try {
+      await store.linkForms({ forms: ['密码库'] })
+    } catch (error) {
+      failure = error
+    }
+    assert.match(String(failure?.message), /at least 2/)
+  })
+
+  const linked = await store.linkForms({ forms: ['密码库', 'vaultwarden', 'bitwarden'], origin: 'test' })
+  check('a learned group bridges wordings in both directions', () => {
+    assert.equal(linked.forms.length, 3)
+    assert.equal(store.stats().concepts, 1)
+  })
+
+  await check('the english record is recalled by its chinese name', async () => {
+    const result = await store.recall({ query: '密码库的备份放在哪', cwd: projectA, minRelevance: 1 })
+    assert.ok(result.items.length >= 1)
+    assert.match(result.items[0].record.trigger, /vaultwarden/)
+  })
+
+  await store.write({
+    scope: 'project', kind: 'fact',
+    trigger: '密码库导出流程的说明',
+    claim: 'Use the admin UI export before upgrading the vault.',
+    cwd: projectA, origin: 'test',
+  })
+  await check('the chinese record is recalled by its english name', async () => {
+    const result = await store.recall({ query: 'vaultwarden export steps', cwd: projectA, minRelevance: 1 })
+    // The english record matches literally and may rank first; the learned
+    // group must at least pull the chinese-only record into the results.
+    assert.ok(result.items.some(item => /密码库/.test(item.record.trigger)))
+  })
+}
+
+{
+  const { store } = makeStore()
+  const written = await store.write({
+    scope: 'project', kind: 'fact',
+    trigger: '甲乙丙丁专属流程',
+    claim: 'A literal trigger with a separately written alias wording.',
+    cwd: projectA, origin: 'test',
+  })
+  await store.updateAliases(written.record.id, ['戊己庚辛的说法'])
+
+  await check('an alias-only query reaches the record', async () => {
+    const result = await store.recall({ query: '戊己庚辛', cwd: projectA, minRelevance: 1 })
+    assert.ok(result.items.length >= 1)
+    assert.equal(result.items[0].record.id, written.record.id)
+  })
+
+  await check('a literal trigger match outranks an alias match', async () => {
+    const literal = await store.recall({ query: '甲乙丙丁', cwd: projectA, minRelevance: 1, explain: true })
+    const aliased = await store.recall({ query: '戊己庚辛', cwd: projectA, minRelevance: 1, explain: true })
+    const literalRow = (literal.explain ?? []).find(row => row.id === written.record.id)
+    const aliasRow = (aliased.explain ?? []).find(row => row.id === written.record.id)
+    assert.ok(literalRow !== undefined && aliasRow !== undefined)
+    assert.ok(literalRow.relevance > aliasRow.relevance)
+    assert.ok(aliasRow.aliasHits > 0)
+  })
+
+  await check('re-writing merges aliases instead of replacing them', async () => {
+    await store.updateAliases(written.record.id, ['戊己庚辛的说法', '新的别名说法'])
+    const record = store.get(written.record.id)
+    assert.deepEqual(record.aliases, ['戊己庚辛的说法', '新的别名说法'])
+    assert.ok(record.aliasAt > 0)
+  })
+}
+
+{
+  const { store } = makeStore()
+
+  await store.linkForms({ forms: ['甲乙', '丙丁'], origin: 'test' })
+  await store.linkForms({ forms: ['丙丁', '戊己'], origin: 'test' })
+  check('overlapping groups merge into one learned group', () => {
+    assert.equal(store.stats().concepts, 1)
+    assert.deepEqual(store.exportConcepts()[0].forms.sort(), ['丙丁', '戊己', '甲乙'].sort())
+  })
+
+  const removed = await store.removeConcepts(['丙丁'])
+  check('unlink removes the group holding the form', () => {
+    assert.equal(removed, 1)
+    assert.equal(store.stats().concepts, 0)
+  })
+}
+
+{
+  const { store, domain } = makeStore()
+  await store.write({
+    scope: 'project', kind: 'fact',
+    trigger: 'the persistent concept fixture',
+    claim: 'A learned dictionary must survive a restart.',
+    cwd: projectA, origin: 'test',
+  })
+  await store.linkForms({ forms: ['持久概念甲', 'persistent'], origin: 'test' })
+  const reopened = reopen(domain)
+  await check('the learned dictionary survives a restart', async () => {
+    assert.equal(reopened.stats().concepts, 1)
+    const hit = await reopened.recall({ query: '持久概念甲怎么用', cwd: projectA, minRelevance: 1 })
+    assert.ok(hit.items.length >= 1)
+    assert.match(hit.items[0].record.trigger, /persistent/)
+  })
+}
+
+{
+  const { store } = makeStore()
+  const missed = await store.recall({ query: '完全无关的查询语句', cwd: projectA, sessionId: 's-reject' })
+  assert.equal(missed.items.length, 0)
+  check('the rejection summary remembers the failed query and the hit count', () => {
+    const rejects = store.rejectsOf('s-reject')
+    assert.equal(rejects.query, '完全无关的查询语句')
+    assert.equal(rejects.hits, 0)
+    assert.ok((rejects.top ?? []).length >= 0)
+  })
+}
+
+// ------------------------------------------------------------ enrichment ----
+
+{
+  const { store } = makeStore()
+  const written = await store.write({
+    scope: 'project', kind: 'fact',
+    trigger: 'vaultwarden exports its data weekly',
+    claim: 'The export job runs on Sunday night and encrypts everything.',
+    cwd: projectA, origin: 'test',
+  })
+
+  check('the enrichment prompt carries the failed question and the record', () => {
+    const prompt = buildEnrichPrompt('密码库怎么导出', [written.record])
+    assert.match(prompt, /密码库怎么导出/)
+    assert.match(prompt, new RegExp(written.record.id))
+    assert.match(prompt, /exports its data weekly/)
+  })
+
+  check('the enrichment answer parses leniently', () => {
+    const parsed = parseEnrichResult(
+      'noise {"records":[{"id":" a ","aliases":["好别名","xy",42,""]},{"id":"","aliases":["yz"]}],"links":[["甲乙","丙丁"],["只有一个"],[]]} tail',
+    )
+    assert.deepEqual(parsed.records, [{ id: 'a', aliases: ['好别名', 'xy'] }])
+    assert.deepEqual(parsed.links, [['甲乙', '丙丁']])
+    assert.deepEqual(parseEnrichResult('not json'), { records: [], links: [] })
+  })
+
+  // A recall that misses: the Chinese wording shares nothing with the record.
+  const coldMiss = await store.recall({ query: '密码库怎么导出', cwd: projectA, sessionId: 's-enrich' })
+  assert.equal(coldMiss.items.length, 0)
+
+  const fakeLlm = {
+    calls: 0,
+    async *stream() {
+      fakeLlm.calls += 1
+      yield {
+        type: 'text-delta',
+        text: JSON.stringify({
+          records: [{ id: written.record.id, aliases: ['密码库导出方法', 'password vault export'] }],
+          links: [['密码库', 'vaultwarden']],
+        }),
+      }
+      yield { type: 'usage', usage: { inputTokens: 120, outputTokens: 60 } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  }
+  const ctx = {
+    get: name => (name === 'llm'
+      ? fakeLlm
+      : name === 'agentDefaultModel'
+        ? { currentSelection: () => ({ provider: 'fake', model: 'fake-model' }) }
+        : undefined),
+  }
+  const config = {
+    includeSubagents: true,
+    llm: {
+      enabled: true, enrich: true,
+      enrichMaxPerSession: 4, enrichMaxPerDay: 6, enrichMinIntervalMs: 0,
+      enrichMaxTokens: 500, enrichMaxRecords: 2, enrichTtlMs: 604_800_000,
+    },
+  }
+  const budgets = { enrichDay: '', enrichCalls: 0, enrichBySession: new Map(), enrichLastAt: new Map() }
+  const outcome = await enrichAfterFailure({
+    ctx, store, config, sessionId: 's-enrich', startedAt: 0, budgets, visibility: 'public',
+  })
+
+  check('a missed recall spends one enrich call and writes aliases plus a learned group', () => {
+    assert.equal(fakeLlm.calls, 1)
+    assert.ok(outcome.enriched >= 1)
+    assert.ok(outcome.linked >= 1)
+    assert.ok((store.get(written.record.id).aliases ?? []).some(alias => alias.includes('密码库')))
+    assert.equal(store.stats().concepts, 1)
+  })
+
+  await check('the same wording now recalls without any model call', async () => {
+    const hit = await store.recall({ query: '密码库怎么导出', cwd: projectA })
+    assert.ok(hit.items.length >= 1)
+    assert.match(hit.items[0].record.trigger, /vaultwarden/)
+  })
+
+  check('the enrichment call is billed to the ledger', () => {
+    const ledger = store.ledgerOf('s-enrich')
+    assert.equal(ledger.enrichCalls, 1)
+    assert.equal(ledger.enrichInputTokens, 120)
+    assert.equal(ledger.enrichOutputTokens, 60)
+  })
+
+  const again = await enrichAfterFailure({
+    ctx, store, config, sessionId: 's-enrich', startedAt: 0, budgets, visibility: 'public',
+  })
+  check('a record enriched once is not re-billed within the cooldown', () => {
+    assert.equal(again.reason, 'no-targets')
+    assert.equal(fakeLlm.calls, 1)
+  })
+
+  check('enrichment stays off with the model call disabled', async () => {
+    const off = await enrichAfterFailure({
+      ctx, store, config: { includeSubagents: true, llm: { enabled: false, enrich: true } },
+      sessionId: 's-enrich', startedAt: 0, budgets, visibility: 'public',
+    })
+    assert.equal(off.reason, 'disabled')
+  })
+}
+
+{
+  // The audience rule outranks the repair: a private record's text never goes
+  // to a model call made from a public conversation, even when it is the one
+  // that missed.
+  const { store } = makeStore()
+  store.setSessionVisibility('s-private', 'private')
+  await store.write({
+    scope: 'project', kind: 'preference',
+    trigger: '隐私触发的专属说法',
+    claim: 'A private record must not be sent to a model from a public chat.',
+    sensitivity: 'private',
+    cwd: projectA, origin: 'test',
+  })
+  const missed = await store.recall({ query: '毫无关联的词句', cwd: projectA, sessionId: 's-private', visibility: 'private' })
+  assert.equal(missed.items.length, 0)
+  assert.ok((store.rejectsOf('s-private').top ?? []).some(entry => entry.reason === 'no-term-overlap'))
+
+  const fakeLlm = {
+    calls: 0,
+    async *stream() {
+      fakeLlm.calls += 1
+      yield { type: 'text-delta', text: '{"records":[],"links":[]}' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  }
+  const ctx = {
+    get: name => (name === 'llm'
+      ? fakeLlm
+      : name === 'agentDefaultModel'
+        ? { currentSelection: () => ({ provider: 'fake', model: 'fake-model' }) }
+        : undefined),
+  }
+  const outcome = await enrichAfterFailure({
+    ctx, store,
+    config: {
+      includeSubagents: true,
+      llm: {
+        enabled: true, enrich: true,
+        enrichMaxPerSession: 4, enrichMaxPerDay: 6, enrichMinIntervalMs: 0,
+        enrichMaxTokens: 500, enrichMaxRecords: 2, enrichTtlMs: 604_800_000,
+      },
+    },
+    sessionId: 's-private', startedAt: 0,
+    budgets: { enrichDay: '', enrichCalls: 0, enrichBySession: new Map(), enrichLastAt: new Map() },
+    visibility: 'public',
+  })
+  check('a private record is never enriched from a public conversation', () => {
+    assert.equal(outcome.reason, 'no-targets')
+    assert.equal(fakeLlm.calls, 0)
+  })
+}
+
+{
+  const config = { includeSubagents: false, llm: { enrichMinIntervalMs: 60_000, enrichMaxPerDay: 1, enrichMaxPerSession: 1 } }
+  const budgets = { enrichDay: dayOf(Date.now()), enrichCalls: 0, enrichBySession: new Map(), enrichLastAt: new Map() }
+  check('the enrich budget blocks subagents, cooldowns, and caps', () => {
+    assert.equal(evaluateEnrichBudget({ budgets, config, sessionId: 'a', isSubagent: true }).allowed, false)
+    assert.equal(evaluateEnrichBudget({ budgets, config, sessionId: 'a', isSubagent: false }).allowed, true)
+    reserveEnrichBudget(budgets, 'a')
+    assert.equal(evaluateEnrichBudget({ budgets, config, sessionId: 'a', isSubagent: false }).reason, 'cooldown')
+    assert.equal(evaluateEnrichBudget({ budgets, config, sessionId: 'b', isSubagent: false }).reason, 'daily-cap')
+  })
+  const { store } = makeStore()
+  await store.recordEnrichAttempt('s1')
+  check('enrich reservations recover from the ledger', () => {
+    const recovered = summarizeEnrichLedger(store.ledgerRows(), dayOf(Date.now()))
+    assert.equal(recovered.calls, 1)
+    assert.equal(recovered.bySession.get('s1'), 1)
+    assert.ok(recovered.lastAt.get('s1') > 0)
+  })
+}
+
+// -------------------------------------------------------- export migration
+
+{
+  const first = makeStore()
+  const written = await first.store.write({
+    scope: 'project', kind: 'fact',
+    trigger: 'the fixtureword export fixture',
+    claim: 'A record whose aliases and learned groups survive a migration.',
+    aliases: ['语义导出别名'],
+    cwd: projectA, origin: 'test',
+  })
+  await first.store.linkForms({ forms: ['语义词甲', 'fixtureword'], origin: 'test' })
+  const rows = first.store.exportRecords({}).rows.map(record => first.store.exportRow(record))
+  const conceptRows = first.store.exportConcepts().map(group => ({
+    type: 'concept', format: 1, id: group.id, forms: group.forms,
+    origin: group.origin, createdAt: group.createdAt, updatedAt: group.updatedAt,
+  }))
+
+  const second = makeStore()
+  const summary = await second.store.importRows([...rows, ...conceptRows])
+  await check('aliases and learned groups migrate through export/import', async () => {
+    assert.equal(summary.linked, 1)
+    const migrated = second.store.get(written.record.id)
+    assert.deepEqual(migrated.aliases, ['语义导出别名'])
+    assert.ok(migrated.aliasAt > 0)
+    assert.equal(second.store.stats().concepts, 1)
+    // Both migration fruits are live retrieval in the new store.
+    const byAlias = await second.store.recall({ query: '语义导出', cwd: projectA, minRelevance: 1 })
+    assert.ok(byAlias.items.length >= 1)
+    const byConcept = await second.store.recall({ query: '语义词甲在哪', cwd: projectA, minRelevance: 1 })
+    assert.ok(byConcept.items.length >= 1)
+    assert.match(byConcept.items[0].record.trigger, /fixtureword/)
+  })
+  check('a newer import row replaces aliases as part of its version', async () => {
+    const updated = await second.store.importRows([{
+      ...rows[0],
+      claim: 'A newer claim with new aliases.',
+      aliases: ['更新后的别名'],
+      updatedAt: rows[0].updatedAt + 10_000,
+    }])
+    assert.equal(updated.updated, 1)
+    assert.deepEqual(second.store.get(written.record.id).aliases, ['更新后的别名'])
+  })
+}
+
+// ---------------------------------------------- the reported field failures
+
+{
+  // The four reworded queries from the operator's live test, against a store
+  // shaped like the one that failed: proxy restart, the ssh box, the hotspot,
+  // the vaultwarden backup, and three backup distractors that used to crowd it
+  // out.
+  const { store } = makeStore()
+  const write = (trigger, claim) => store.write({ scope: 'project', kind: 'fact', trigger, claim, cwd: projectA, origin: 'test' })
+  await write('代理服务的重启步骤', 'Restart the proxy with systemctl restart nginx-proxy.')
+  await write('玩客云盒子 ssh 连不上的排查', 'The box drops ssh when the MTU is wrong; set MTU 1400.')
+  await write('手机热点连不上时切换信道', 'Channel congestion; switch the hotspot to channel 36.')
+  const vault = await write('vaultwarden 备份脚本每周日运行', 'The vaultwarden backup script runs every Sunday at 3am.')
+  await write('R2 存储桶的备份策略', 'R2 buckets use lifecycle rules, not scripts.')
+  await write('加密照片包的备份位置', 'Encrypted photo archives live on the NAS.')
+  await write('Hermes 旧数据的备份归档', 'Old Hermes data is archived in cold storage.')
+
+  await check('the three queries that already worked keep working', async () => {
+    const proxyHit = await store.recall({ query: '代理重启怎么弄', cwd: projectA })
+    assert.match(proxyHit.items[0].record.trigger, /代理/)
+    const sshHit = await store.recall({ query: '玩客云 ssh 连不上', cwd: projectA })
+    assert.match(sshHit.items[0].record.trigger, /玩客云/)
+    const hotspotHit = await store.recall({ query: '热点连不上', cwd: projectA })
+    assert.match(hotspotHit.items[0].record.trigger, /热点/)
+  })
+
+  await check('before learning, the vaultwarden record is missed exactly as reported', async () => {
+    const cold = await store.recall({ query: '密码库备份在哪', cwd: projectA })
+    assert.ok(cold.items.every(item => item.record.id !== vault.record.id))
+  })
+
+  // The post-enrichment state: the agent has linked the product names and the
+  // record carries the aliases the model wrote for the missed wording.
+  await store.linkForms({ forms: ['密码库', 'vaultwarden', 'bitwarden', '密码管理器'], origin: 'test' })
+  await store.updateAliases(vault.record.id, ['密码库备份在哪看', 'password vault backup location'])
+
+  await check('after learning, the vaultwarden record answers the reworded query first', async () => {
+    const learned = await store.recall({ query: '密码库备份在哪', cwd: projectA })
+    assert.equal(learned.items[0].record.id, vault.record.id)
   })
 }
 

@@ -73,6 +73,7 @@ const tables = {
   tasks: asTable(loadTable(directory, 'tasks')),
   ledger: asTable(loadTable(directory, 'ledger')),
   events: asTable(loadTable(directory, 'events')),
+  concepts: asTable(loadTable(directory, 'concepts')),
 }
 
 const store = createStore({
@@ -87,7 +88,7 @@ for (const row of result.explain ?? []) {
   const marker = row.relevance >= threshold ? 'IN ' : '   '
   const parts = row.reason !== undefined
     ? row.reason
-    : `trigger=${row.triggerScore.toFixed(2)} (hits ${row.triggerHits.toFixed(1)}) query=${row.queryCoverage.toFixed(2)}`
+    : `trigger=${row.triggerScore.toFixed(2)} (hits ${row.triggerHits.toFixed(1)}, alias ${(row.aliasHits ?? 0).toFixed(1)}) query=${row.queryCoverage.toFixed(2)}`
   console.log(`${marker} ${row.relevance.toFixed(3).padStart(7)} ${parts} ${row.id} ${record?.status} ${record?.kind} :: ${String(record?.trigger ?? '').slice(0, 90)}`)
 }
 console.log(`\nitems: ${result.items.length}, tokens: ${result.tokens}`)

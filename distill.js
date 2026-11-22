@@ -8,9 +8,10 @@
  * user's next turn never waits for it.
  */
 
-import { evaluateDistillBudget, reserveDistillBudget, summarizeDistillLedger } from './lib/budget.js'
+import { evaluateDistillBudget, reserveDistillBudget, summarizeDistillLedger, summarizeEnrichLedger } from './lib/budget.js'
 import { evaluateCheckpointGuard } from './lib/checkpoint-guard.js'
 import { checkContract } from './lib/contract.js'
+import { enrichAfterFailure, modelSelectionOf } from './lib/enrich.js'
 import { evaluateSupport, renderSupport } from './lib/support.js'
 import { clip, estimateTokens, nowMs, oneLine } from './lib/util.js'
 
@@ -39,6 +40,19 @@ const DEFAULTS = {
     deepMaxTokens: 1400,
     minIntervalMs: 120_000,
     maxCandidates: 2,
+    /**
+     * Failure-driven semantic enrichment: when this turn's recall produced
+     * zero hits, one extra bounded call writes retrieval aliases and learned
+     * synonym groups. On only while `enabled` is, with its own (persisted)
+     * budget; `false` keeps the row to distillation + checkpoints.
+     */
+    enrich: true,
+    enrichMaxPerSession: 4,
+    enrichMaxPerDay: 6,
+    enrichMinIntervalMs: 45_000,
+    enrichMaxTokens: 500,
+    enrichMaxRecords: 2,
+    enrichTtlMs: 604_800_000,
   },
 }
 
@@ -262,20 +276,11 @@ async function distillWithModel(ctx, store, config, sample, level, budgets) {
   }
   let selection
   try {
-    const agents = ctx.get('agents')
-    const agent = agents?.get(sample.sessionId)
-    selection = agent?.model?.current()
+    selection = modelSelectionOf(ctx, sample.sessionId)
   } catch {
     selection = undefined
   }
   if (selection === undefined) {
-    try {
-      selection = ctx.get('agentDefaultModel')?.currentSelection()
-    } catch {
-      selection = undefined
-    }
-  }
-  if (selection?.provider === undefined || selection?.model === undefined) {
     store.log('debug', 'distill skipped: no model selection')
     return 0
   }
@@ -449,10 +454,20 @@ export async function apply(ctx, rawConfig) {
   // State belongs to this mounted row, not to the module: two instances must
   // not share samples, budgets, or a cooldown.
   const samples = new Map()
-  const budgets = { day: '', calls: 0, bySession: new Map(), lastAt: new Map() }
+  const budgets = {
+    day: '',
+    calls: 0,
+    bySession: new Map(),
+    lastAt: new Map(),
+    enrichDay: '',
+    enrichCalls: 0,
+    enrichBySession: new Map(),
+    enrichLastAt: new Map(),
+  }
 
   // Recover today's reserve and the last attempt from the ledger so a restart
-  // does not reset either the caps or the cooldown.
+  // does not reset either the caps or the cooldown. Enrichment recovers the
+  // same way, from its own persisted fields.
   const today = new Date().toISOString().slice(0, 10)
   try {
     const recovered = summarizeDistillLedger(store.ledgerRows(), today)
@@ -463,14 +478,24 @@ export async function apply(ctx, rawConfig) {
     if (recovered.calls > 0) {
       store.log('info', `distill budget recovered from ledger: ${recovered.calls} call(s) today`)
     }
+    const recoveredEnrich = summarizeEnrichLedger(store.ledgerRows(), today)
+    budgets.enrichDay = today
+    budgets.enrichCalls = recoveredEnrich.calls
+    budgets.enrichBySession = new Map(recoveredEnrich.bySession)
+    budgets.enrichLastAt = new Map(recoveredEnrich.lastAt)
+    if (recoveredEnrich.calls > 0) {
+      store.log('info', `enrich budget recovered from ledger: ${recoveredEnrich.calls} call(s) today`)
+    }
   } catch (error) {
-    store.log('debug', `distill budget recovery failed: ${String(error?.message ?? error)}`)
+    store.log('debug', `budget recovery failed: ${String(error?.message ?? error)}`)
   }
 
   ctx.effect(() => () => {
     samples.clear()
     budgets.bySession.clear()
     budgets.lastAt.clear()
+    budgets.enrichBySession.clear()
+    budgets.enrichLastAt.clear()
   })
 
   // A session can end without a `turn/end` (disposed agent, aborted process);
@@ -516,6 +541,25 @@ export async function apply(ctx, rawConfig) {
         })
       }
 
+      // Failure-driven semantic enrichment: independent of the distillation
+      // score and of whether a distillation call fires, with its own budget,
+      // cooldown, and persisted reservations. Detached like the distill call —
+      // the next turn never waits for it.
+      if (config.llm.enabled === true && config.llm.enrich !== false) {
+        void enrichAfterFailure({
+          ctx,
+          store,
+          config,
+          sessionId: sample.sessionId,
+          startedAt: sample.startedAt,
+          budgets,
+          isSubagent: sample.origin === 'subagent',
+          visibility: store.sessionVisibility(sample.sessionId),
+        }).catch(error => {
+          store.log('warn', `enrichment failed: ${String(error?.message ?? error)}`)
+        })
+      }
+
       if (config.llm.enabled !== true) return
       if (analysis.score < config.llm.threshold) return
       // A turn that only moved state around has nothing transferable to teach;
@@ -541,5 +585,8 @@ export async function apply(ctx, rawConfig) {
     }
   })
 
-  ctx.logger?.info?.(`[context-manager] distill active (llm ${config.llm.enabled ? `on, threshold ${config.llm.threshold}` : 'off'})`)
+  ctx.logger?.info?.(
+    `[context-manager] distill active (llm ${config.llm.enabled ? `on, threshold ${config.llm.threshold}` : 'off'}`
+    + `${config.llm.enabled && config.llm.enrich !== false ? ', enrich on' : ''})`,
+  )
 }

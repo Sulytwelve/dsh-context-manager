@@ -147,6 +147,29 @@ check('import measures bytes, not UTF-16 length', () => {
   assert.match(String(oversize?.message), /too large/)
 })
 
+// The agent writes its own retrieval dictionary through the tool.
+const linkWrite = await host.tool.execute({
+  op: 'write', scope: 'project', kind: 'fact',
+  trigger: 'the semantic link fixture record',
+  claim: 'A record reached through a learned synonym group.',
+  aliases: ['语义联接别名'],
+}, exec('session-a', projectA))
+assert.match(linkWrite.text, /^stored mem_/)
+const linked = await host.tool.execute({ op: 'link', forms: ['语义联接词', 'linkfixture'] }, exec('session-a', projectA))
+check('link learns a synonym group through the tool', () => {
+  assert.match(linked.text, /语义联接词 = linkfixture/)
+  assert.equal(host.store.stats().concepts, 1)
+})
+const linkRecall = await host.tool.execute({ op: 'recall', query: '语义联接词', limit: 5 }, exec('session-a', projectA))
+check('a learned group changes what the tool recall finds', () => {
+  assert.match(linkRecall.text, /the semantic link fixture record/)
+})
+const unlinked = await host.tool.execute({ op: 'link', forms: ['语义联接词'], remove: true }, exec('session-a', projectA))
+check('link with remove deletes the learned group', () => {
+  assert.match(unlinked.text, /removed 1/)
+  assert.equal(host.store.stats().concepts, 0)
+})
+
 // ---------------------------------------------- bridge refresh with recall off
 
 const prefs = join(root, 'model-prefs.json')

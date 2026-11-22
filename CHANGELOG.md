@@ -3,6 +3,44 @@
 All notable changes to `@sulytwelve/dsh-context-manager` (formerly
 `@sulytwelve/dsh-memory-astra62`). Versions are Git tags; the tag is the release.
 
+## 1.7.0
+
+Semantic retrieval: wordings that mean the same thing now find each other, and
+the vocabulary connecting them is written by the agent at runtime — nothing
+semantic is hardcoded in this package.
+
+- **Learned concept dictionary.** A new `concepts` table plus
+  `memory{op:"link", forms:[...]}`: the agent declares surface forms that
+  always mean the same thing (`密码库` = `vaultwarden`). Groups merge when they
+  share a form, `remove: true` deletes the group holding a form, and both the
+  query and every record pass through the learned index — so a reworded
+  question reaches the record in either language or phrasing. The dictionary
+  survives restarts and migrates through export/import (`type: "concept"` rows
+  on `all: true` or a private export; a default public export reports
+  `conceptsOmitted`).
+- **Failure-driven alias enrichment.** When a turn's last recall produced zero
+  hits against non-empty candidates, one bounded model call (in the distill
+  row, off the hot path, with its own persisted budget — ≤4 per session, ≤6
+  per day, 45 s cooldown) asks the model to write retrieval aliases for the
+  top rejected records and confident synonym groups for the store. The same
+  wording misses once, then matches forever, on a recall path that never
+  calls a model. Private records are never sent to a call made from a public
+  conversation; `llm.enrich: false` keeps the row to distillation only.
+- **Record aliases.** `write` accepts `aliases` (merged, never replaced).
+  Alias-only matches count as triggers at 0.7 weight — enough to surface,
+  never enough to outrank a literal trigger match. `aliasAt` drives the
+  re-enrich cooldown; aliases travel through export and import.
+- **Latin stem folding.** Generic morphology, not a dictionary:
+  `backups` → `backup`, `restarting` → `restart`, while `alias`, `status`,
+  `dns` stay whole; applied consistently to queries, records, and learned
+  forms so both sides always fold the same way.
+- **Rejection diagnostics.** The last recall's rejection summary keeps the
+  failed query and the hit count (in memory only), which is how the
+  enrichment learns from the exact wording that missed.
+- Docs: `docs/SEMANTIC-RETRIEVAL.md` describes the three layers and the
+  reserved seam a vector tier would plug into. Suites are now 18 + 132 + 13
+  checks.
+
 ## 1.6.1
 
 Security and correctness pass from an external review of 1.6.0.

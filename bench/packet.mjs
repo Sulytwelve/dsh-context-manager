@@ -74,6 +74,7 @@ const tables = {
   tasks: asTable(loadTable(directory, 'tasks')),
   ledger: asTable(loadTable(directory, 'ledger')),
   events: asTable(loadTable(directory, 'events')),
+  concepts: asTable(loadTable(directory, 'concepts')),
 }
 const store = createStore({
   domain: { name: 'agent_memory', table: name => tables[name], async close() {} },
