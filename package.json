@@ -41,7 +41,6 @@
     "locale",
     "docs",
     "test",
-    "integrations",
     "CHANGELOG.md",
     "icon.svg",
     "icons"

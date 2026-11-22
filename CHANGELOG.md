@@ -5,41 +5,63 @@ All notable changes to `@sulytwelve/dsh-context-manager` (formerly
 
 ## 1.7.0
 
-Semantic retrieval: wordings that mean the same thing now find each other, and
-the vocabulary connecting them is written by the agent at runtime — nothing
-semantic is hardcoded in this package.
+Semantic retrieval and one shared memory: wordings that mean the same thing now
+find each other, the vocabulary connecting them is written by the agent at
+runtime, and every conversation of the bot reads the same store.
 
+- **Shared memory.** Private chats and group chats now read and write the same
+  records, aliases, learned dictionary, and per-directory checkpoint. The
+  private/public session classification, `memoryVisibility` service, QQ
+  `model-prefs` bridge, and `integrations/` patch are gone; no chat-type API or
+  upstream change is required. `sensitivity` remains only as an optional content
+  marker for a future, separately installed owner guard; this bundle does not
+  filter on it. Legacy private-classified records and checkpoints become shared;
+  old per-session private checkpoint keys are no longer consulted.
 - **Learned concept dictionary.** A new `concepts` table plus
   `memory{op:"link", forms:[...]}`: the agent declares surface forms that
-  always mean the same thing (`密码库` = `vaultwarden`). Groups merge when they
-  share a form, `remove: true` deletes the group holding a form, and both the
-  query and every record pass through the learned index — so a reworded
-  question reaches the record in either language or phrasing. The dictionary
-  survives restarts and migrates through export/import (`type: "concept"` rows
-  on `all: true` or a private export; a default public export reports
-  `conceptsOmitted`).
-- **Failure-driven alias enrichment.** When a turn's last recall produced zero
-  hits against non-empty candidates, one bounded model call (in the distill
-  row, off the hot path, with its own persisted budget — ≤4 per session, ≤6
-  per day, 45 s cooldown) asks the model to write retrieval aliases for the
-  top rejected records and confident synonym groups for the store. The same
-  wording misses once, then matches forever, on a recall path that never
-  calls a model. Private records are never sent to a call made from a public
-  conversation; `llm.enrich: false` keeps the row to distillation only.
+  always mean the same thing (`密码库` = `vaultwarden`). Groups merge when a
+  normalized key intersects — the Latin stem or the exact CJK phrase — so
+  `backups`/`backup` cannot form two groups that shadow each other, while two
+  different Chinese phrases are not guessed to be synonyms. `remove: true`
+  deletes a visible group; both the query and every record pass through the
+  shared index, so a reworded question reaches the record in any conversation.
+  The dictionary survives restarts and migrates through export/import
+  (`type: "concept"` rows are included in every export).
+- **Failure-driven alias enrichment.** When this turn's last **automatic**
+  recall produced zero hits against non-empty candidates, one bounded model call
+  (in the distill row, off the hot path, with its own persisted budget — ≤4 per
+  session, ≤6 per day, 45 s cooldown) shows the model up to eight rejected
+  candidates and asks for aliases only for records that actually apply plus
+  confident synonym groups. It may answer that none applies, and the prompt has
+  its own token ceiling. The same wording misses once, then may match through
+  the learned aliases/groups; if the target is outside the candidate window the
+  call cannot learn it and `link`/`write{aliases}` is the explicit path.
+  `llm.enrich: false` keeps the row to distillation only.
+- **Source-correct learning.** Automatic and explicit recall summaries are kept
+  apart. The turn-end enrichment consumes the automatic summary once and clears
+  it; an explicit `memory{op:"recall"}` later in the turn cannot replace the
+  user's wording, and a successful explicit query cannot suppress a real miss.
 - **Record aliases.** `write` accepts `aliases` (merged, never replaced).
-  Alias-only matches count as triggers at 0.7 weight — enough to surface,
-  never enough to outrank a literal trigger match. `aliasAt` drives the
-  re-enrich cooldown; aliases travel through export and import.
+  Alias-only matches contribute 0.7 trigger weight; the final order still
+  depends on confidence, freshness, and feedback, so an alias match is not
+  ordered before every literal one. `aliasAt` drives the 7-day re-enrich
+  cooldown; aliases travel through export and import.
 - **Latin stem folding.** Generic morphology, not a dictionary:
   `backups` → `backup`, `restarting` → `restart`, while `alias`, `status`,
-  `dns` stay whole; applied consistently to queries, records, and learned
-  forms so both sides always fold the same way.
+  `dns` stay whole; applied consistently to queries, records, learned forms, and
+  alias matching.
 - **Rejection diagnostics.** The last recall's rejection summary keeps the
-  failed query and the hit count (in memory only), which is how the
-  enrichment learns from the exact wording that missed.
-- Docs: `docs/SEMANTIC-RETRIEVAL.md` describes the three layers and the
-  reserved seam a vector tier would plug into. Suites are now 18 + 132 + 13
-  checks.
+  failed query and the hit count (in memory only); the enrichment candidate pool
+  is larger than the three-line `report` summary, rotates zero-score ties so a
+  large store does not always inspect its oldest records, and clears on session
+  disposal.
+- **Import and durability.** Concept import merges by normalized key and rebuilds
+  the record index once per batch instead of once per row; a merged group is
+  persisted before the absorbed groups are deleted, so a crash leaves a
+  duplicate (tolerable) rather than lost forms.
+- Docs: `docs/SEMANTIC-RETRIEVAL.md`, `docs/DETAIL.md`, README, and both locales
+  describe shared memory, the candidate window, and the ranking caveat. Suites
+  are now 18 + 115 + 12 checks.
 
 ## 1.6.1
 

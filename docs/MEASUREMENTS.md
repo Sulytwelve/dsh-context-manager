@@ -238,19 +238,19 @@ existing records; stored data lives under `$DSH_HOME/storages/agent_memory/`.
 |---|---|
 | `memory` tool schema, every request | 1,935 chars ≈ **538 tokens** (down from 2,897 chars ≈ 805 after trimming) |
 | one recall packet | **95–188 tokens** (default budget 220) |
-| recall pass, first step of a turn | **0.5–2 ms**, no model call, no I/O **while no probe is due and the QQ bridge is off** |
+| recall pass, first step of a turn | **0.5–2 ms**, no model call, no I/O **while no probe is due** |
 | probe sweep | ≤ 40 `stat`/substring checks per 15 min, no model call |
 | distillation | 1 call per qualifying turn, ~1.0–1.6 k tokens; **7 calls / 9,905 tokens** across the 8 sessions that produced ledger rows before the "substantial turn" gate was added |
 
-Cost depends on the scenario, so these figures must be read with it. Five
+Cost depends on the scenario, so these figures must be read with it. Four
 distinct situations exist: (1) the tool mounted with automatic recall off; (2)
-automatic recall with no due probe and the bridge off; (3) a front-line probe
-that reads a file asynchronously; (4) the QQ bridge enabled (one stat per step,
-plus a read when the prefs file changes); (5) distillation enabled (one bounded
-request on a qualifying turn). The 0.5–2 ms figure is scenario 2. `injectionMs`
-includes recall attempts that rendered nothing, so it measures the retrieval
-attempt, not only successful injections; `injections`/`injectionTokens` count
-the latter.
+automatic recall with no due probe; (3) a front-line probe that reads a file
+asynchronously; (4) distillation plus the optional failure-driven enrichment
+(one bounded request each). The QQ bridge measured in earlier runs was removed
+in 1.7.0 along with the per-conversation audience split. The 0.5–2 ms figure is
+scenario 2. `injectionMs` includes recall attempts that rendered nothing, so it
+measures the retrieval attempt, not only successful injections;
+`injections`/`injectionTokens` count the latter.
 
 The first version distilled on almost every turn, including two-step sessions
 that only saved a checkpoint. Requiring a turn score of 4 **and** at least three
@@ -322,11 +322,14 @@ exercised; the fixes are in this revision and are covered by
 - Distillation quality was measured by *records written*, not by downstream
   outcomes. A stale or wrong distilled record costs recall tokens until a probe
   or a human retires it.
-- The correctness and packaging work in 1.6.1 (checkpoint persistence,
-  audience-filtered diagnostics, packet budget, owner scoping, import
-  validation, probe scheduling, distillation accounting) is verified by the
-  store-level, tool-entry, and packed-package suites, not by a new DSH
-  benchmark run; no model tokens were spent re-measuring the tables above.
+- The correctness and packaging work in 1.6.1–1.7.0 (checkpoint persistence,
+  owner scoping, import validation, probe scheduling, distillation accounting,
+  shared memory, the learned dictionary, aliases, and failure-driven
+  enrichment) is verified by the store-level, tool-entry, and packed-package
+  suites, not by a new DSH benchmark run; no model tokens were spent
+  re-measuring the tables above. The semantic features have no new benchmark:
+  normal recall is still local and free, while enrichment is one bounded
+  turn-end call and is not separately timed here.
 - All benchmark runs are on one machine, one DSH version (`0.2.2-rc.3`), one
   provider. They are historical and are labeled as such: re-measure with the
   fixture builder in `bench/` (source checkout only) before comparing.

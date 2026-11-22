@@ -22,7 +22,7 @@ Each row is a separate Loader entry, so each can be disabled on its own in
 | Row | Id | Model calls | What it costs |
 |---|---|---|---|
 | Memory core | `memory-core` | none | One in-memory scoring pass at the first step of a turn; a few small file writes |
-| Memory distillation | `memory-distill` | 0–2 per qualifying turn (opt-in) | One bounded background request, after the turn has already closed |
+| Memory distillation | `memory-distill` | at most one per qualifying turn, plus at most one failure-driven enrichment call | Bounded background requests, after the turn has already closed |
 | Memory probes | `memory-probe` | none | A periodic `stat`/substring check of at most 40 records |
 
 Turning `memory-distill` off removes every model call the memory system can
@@ -32,30 +32,34 @@ recall pass described below.
 
 ## What is stored
 
-An `agent_memory` storage domain with four per-record tables:
+An `agent_memory` storage domain with five per-record tables:
 
 - **memories** — `scope` (`user` / `project` / `session`), the derived `owner`,
   `kind` (`preference` / `procedure` / `fact` / `decision` / `pitfall` /
   `hypothesis`), `trigger` (when it applies), `claim` (the transferable
   statement), `evidence` (where it came from), `confidence`, usage counters, an
-  optional `probe`, `lastCheckedAt`, the `support` class of distilled records, and
-  supersession links. Superseded records stay readable.
+  optional `probe`, `lastCheckedAt`, retrieval `aliases`/`aliasAt`, the `support`
+  class of distilled records, an optional `sensitivity` marker for an external
+  owner guard, and supersession links. Superseded records stay readable.
+- **concepts** — the learned synonym dictionary: surface forms the agent declared
+  equivalent through `link`, enrichment, or import. It is shared by every
+  conversation of the bot.
 - **tasks** — one checkpoint per working directory: milestone, next action,
-  unresolved question, acceptance condition, the session that wrote it.
+  unresolved question, acceptance condition, the session that wrote it. Shared
+  by every conversation.
 - **ledger** — per-session counters used for measurement: turns, steps, model
   input/output tokens, injections and their tokens, probe outcomes, distillation
-  calls and their tokens.
+  and enrichment calls and their tokens.
 - **events** — a bounded ring of recent memory-system events for `status`.
 
-### One isolation identity
+### One shared memory
 
-`owner` is `user`, `project:<normalized cwd>`, or `session:<session id>`. Write
-time dedupe, index rebuild, and recall all compare that one string, so a record
-cannot be merged, ranked, or served outside the boundary it was recorded in. A
-restatement in project B can no longer fold into project A's record and inherit
-its wording with B's evidence. Records written before the field existed derive
-their owner from `cwd`/`sessionId`, so an upgrade re-scopes rather than drops
-them.
+`owner` decides record dedupe and management boundaries, not conversation
+visibility. Every chat of the same bot reads the same records, aliases,
+dictionary, and checkpoint for a working directory. There is no chat-type branch
+and no `memoryVisibility`/bridge dependency: the store is one memory. An optional
+`sensitivity: "private"` marker is preserved for a separately installed owner
+guard; this bundle does not filter on it.
 
 ## When memory is used
 
@@ -64,8 +68,19 @@ when steering arrives). It builds a query from the claimed user text and scores
 every active record by **trigger coverage**: the idf-weighted share of the
 record's trigger vocabulary that the prompt actually uses, saturating so a
 verbose trigger is not punished for its extra words, plus a smaller term for how
-much of the prompt the record explains at all. Confidence, freshness, and
-feedback counters weight the result.
+much of the prompt the record explains at all. Literal words are folded through
+a small Latin stemmer; record aliases count as triggers at 0.7; and learned
+concept terms from the shared dictionary join both sides. Confidence, freshness,
+and feedback counters weight the result.
+
+A zero-hit recall can trigger one bounded enrichment call at turn end. It reads
+the **automatic** recall summary for this turn — never an explicit tool query
+that happened to run later — and shows the model up to
+`llm.enrichMaxCandidates` (8) rejected records, capped by
+`llm.enrichMaxPromptTokens` (1200). The model may answer with no matching record;
+if it picks one, its aliases are merged and its synonym groups enter the shared
+dictionary. A record already enriched rests for `llm.enrichTtlMs` (7 days), and
+the call has its own persisted caps (4/session, 6/day, 45 s cooldown).
 
 Candidates due for a check — never checked, or checked longer ago than
 `recall.probeTtlMs`, where `0` means every recall — are probed before they can
@@ -131,107 +146,63 @@ keeps the readable path inside the record.
 One tool, `memory`, with operations:
 
 - `write` — persist one lesson: `kind`, `trigger`, `claim`, optional `evidence`,
-  `confidence`, `tags`, and an optional `probe` (`path-exists` or
-  `file-contains`). `demote: true` lets that write lower an existing confidence;
-  `sensitivity: "private"` keeps it out of automatic recall.
-- `recall` — explicit search over the store.
-- `checkpoint` / `resume` — save and read the task state for this directory.
+  `confidence`, `tags`, retrieval `aliases`, and an optional `probe`
+  (`path-exists` or `file-contains`). `demote: true` lets that write lower an
+  existing confidence. `aliases` are appended, never replaced. An optional
+  `sensitivity: "private"` marker is stored for an external owner guard; this
+  bundle does not filter on it.
+- `link` — declare 2+ surface forms that always mean the same thing
+  (`{"op":"link","forms":["密码库","vaultwarden"]}`). The dictionary is shared by
+  the bot; groups merge when a normalized key intersects (Latin stem or exact CJK
+  phrase), and `remove: true` deletes the visible group.
+- `recall` — explicit search over the shared store.
+- `checkpoint` / `resume` — save and read the single task state for this
+  directory; every conversation sees it.
 - `probe` / `feedback` / `forget` / `set_status` — maintain a record.
 - `set_confidence` — lower (or raise) one record's confidence without rewriting
   its claim, for an over-confident import or a stale snapshot.
-- `export` — read-only JSONL of the store, one page at a time.
+- `export` — read-only JSONL of records plus the shared dictionary, one page at a
+  time.
 - `status` — counters for this session and the store, the review hint, and a
   checkpoint left by another session.
-- `report` — up to the last 40 **persisted** session ledger rows
-  (token/call/latency), not this session alone.
+- `report` — up to the last 40 **persisted** session ledger rows, including
+  distillation and enrichment calls/tokens, not this session alone.
 
-## Private records
+## Shared memory
 
-`user` scope is global, so a preference recorded in a one-to-one conversation
-would otherwise be injected into any other conversation, including a shared one.
-The gate is fail-closed and structural rather than advisory:
+Every conversation of the same bot reads and writes the same store: records,
+aliases, learned dictionary, and checkpoint for a directory. There is no
+private/group branch, no `memoryVisibility` service, no QQ bridge, and no
+transport patch to install. A term taught in one chat is available in another,
+and the same export arguments produce the same content from either entry point.
 
-- `write` accepts `sensitivity: "private" | "public"` and stores it on the
-  record; sensitivity is independent of owner scope. A write from a conversation
-  already declared private defaults to `private`;
-- automatic recall drops private records unless the session is declared private,
-  and counts them in the ledger. There is no config switch that serves them to a
-  public session;
-- an explicit `recall` obeys the same boundary: in a public conversation it
-  returns the suppressed count only, never ids, triggers, or text. The fix is to
-  switch the conversation to private, not to call the tool harder;
-- `export` likewise omits private rows outside a private conversation and
-  reports `privateOmitted`;
-- `status` reports session visibility, private-record count, records withheld in
-  this session, and whether a checkpoint was withheld — counts only;
-- `reviewGroups` (the duplicate hint) excludes private records in a public
-  session, so their ids and triggers do not reach a shared transcript;
-- a checkpoint written in a private session is stored under a session-specific
-  key; a checkpoint whose classification is unknown (written before this
-  release) is withheld as a whole from other sessions, because a task state is
-  not partially trustworthy.
-
-There is no host-side signal to infer "public conversation": `SessionHeader` has
-`cwd`, `parentSession`, `isSeeded`, `origin` (`subagent`), `delegationDepth`, and
-`agentPreset` — nothing about audience, and `CreateSessionOptions.meta` accepts
-no extra field. The declaration therefore has to come from outside: the row
-config (`recall.privateSessions` / `recall.publicSessions`) or the
-`memoryVisibility` service exposed for transport plugins. A public declaration
-wins over a conflicting private one, and unknown means public — the
-asymmetric-cost choice: withholding a private record from a shared conversation
-is cheap, leaking it is not. The tool has no operation to declare a conversation
-private: user or model text cannot widen its own audience.
-
-Migration defaults:
-
-| Record | Default treatment |
-|---|---|
-| `sensitivity: "private"` | withheld everywhere except private conversations |
-| `sensitivity: "public"` | shared |
-| no field, `scope: user`, `kind: preference` | **private until reviewed** |
-| no field, any other record | public |
-| checkpoint, no `sensitivity` field | **withheld from other sessions** |
-
-For `@tencent-connect/dsh-qqbot`, the scope is known internally
-(`ChatScope = 'c2c' | 'group'`) but is not exposed: no service is registered and
-session ids are random (`session-<uuid>`), so it cannot be read from the session
-id. The plugin does persist the mapping in `~/.dsh-qqbot/model-prefs.json`
-(`sessionIds: { "qqbot:<appId>:c2c:<peer>": "session-…" }`), and this plugin can
-read it — `recall.visibilityBridge: true` opts in; it is off by default because
-it reads another plugin's data file. The bridge re-reads only when the file's
-mtime/size changes (checked once per step), so a QQ session created after boot is
-mapped before its first recall and a mid-session change is picked up on the next
-step. It is still a foreign-file read, so the durable fix belongs in the
-transport: `integrations/dsh-qqbot-memory-visibility.patch` is a validated,
-fail-soft patch that makes `dsh-qqbot` call the service directly after a session
-is created, resumed, or re-forked (see `integrations/README.md`). Once that
-lands, the bridge can be deleted.
-
-That call also covers sessions that `/new` has since re-keyed, which the prefs
-file no longer lists. The patch applies to a checkout of the MIT-licensed
-`dsh-qqbot`; no rights are assumed over the upstream package.
+`sensitivity: "private"` is preserved only as a **content marker** for a future,
+separately installed owner guard. Core recall, export, and checkpoints ignore it.
+The old 1.6.x per-session private checkpoint keys are not consulted; the single
+shared checkpoint for the directory wins. A legacy `sensitivity` value is kept on
+the record so an external guard can still distinguish it.
 
 ## Export and import
 
 `export` is read-only and prints JSONL: one header line (`type: "export"`,
-`format: 1`, `total`, `offset`, `limit`, `exported`) then one line per record
+`format: 1`, `total`, `offset`, `limit`, `exported`), one line per record
 (`type: "memory"`, `format: 1`, `id`, `dedupeKey`, `owner`, `scope`, `kind`,
-`trigger`, `claim`, `evidence`, `confidence`, `status`, `probe`, `tags`, and the
-timestamps). Rows are sorted by owner, dedupe key, and id, so two exports of an
-unchanged store differ only in `generatedAt`. Filters are `owner`, `scope`,
-`status`, `limit` (default 100, capped at 500), and `offset`. This is a snapshot
-of the **memory records** only: checkpoints, the ledger, and the event ring are
-local telemetry and are not exported. For a full-domain backup, stop DSH and
+`trigger`, `claim`, `evidence`, `confidence`, `status`, `probe`, `tags`,
+`aliases`, `aliasAt`, `sensitivity`, and the timestamps), then one
+`type: "concept"` line per shared synonym group. Rows are sorted by owner, dedupe
+key, and id; concept rows are sorted by id. Two exports of an unchanged store
+differ only in `generatedAt`. Filters are `owner`, `scope`, `status`, `limit`
+(default 100, capped at 500), and `offset`. This is a snapshot of the **memory
+records plus the shared dictionary**: checkpoints, the ledger, and the event ring
+are local telemetry and are not exported. For a full-domain backup, stop DSH and
 copy the whole `$DSH_HOME/storages/agent_memory/` tree.
 
 Scope: by default an export covers the caller's owners (`user`, its project,
 its session); `all: true` is the explicit operator-wide path for migration.
-
-**A complete record export needs a private conversation.** A public-session
-export omits private records and reports only `privateOmitted` in the header.
-Before exporting a full record copy, either declare the session in
-`recall.privateSessions` (or via `memoryVisibility`) and run the export there, or
-copy the storage domain instead.
+Concept rows are never owner-scoped: they are included on every export, and the
+same arguments produce the same content from any conversation. A
+`sensitivity: "private"` marker does not hide a record from export; an external
+owner guard can filter it before the tool is called.
 
 Import maps rows back by `owner + dedupeKey`, **not** by claim similarity: a
 `write` re-derivation would merge two records that carry different ids and can
@@ -265,9 +236,17 @@ rules:
 - claim, evidence, probe, support, and `lastCheckedAt` are applied as **one
   version**: a newer claim drops the old probe's evidence instead of inheriting
   it;
+- `aliases` travel with a row when present; a newer row's alias set replaces the
+  local one as part of its version, while a row from an older export without the
+  field never strips learned aliases;
+- `type: "concept"` rows merge by normalized form key (Latin stem or exact CJK
+  phrase), are idempotent, and rebuild the record index once per import batch;
+  a row with fewer than two valid forms is rejected;
 - on insert the original `id`, `dedupeKey`, timestamps, counters, provenance,
   and supersession links are preserved, so on a same-version store with valid
-  rows `export → import → export` reproduces the record layer.
+  rows `export → import → export` reproduces the record layer (concept rows merge
+  and receive a new id, so that layer is semantically rather than byte
+  identical).
 
 Import is a write-class capability, not a lower trust boundary: the same caller
 can already call `write`, but a row also carries timestamps and counters, so an
@@ -275,12 +254,13 @@ imported JSONL file must be treated as untrusted input. Confidence still only
 falls by an explicit `set_confidence` or a `write` with `demote: true`.
 
 `report` appends the last recall's rejection summary for the calling session:
-counts per reason (`no-overlap`, `below-threshold`, `private`, `probe-failed`,
+counts per reason (`no-overlap`, `below-threshold`, `probe-failed`,
 `probe-budget`, `token-budget`, `packet-limit`) and the three highest-scoring
-rejected candidates. Outside a private session a private-gated candidate is
-printed as `[withheld private]` with no id; that is the same boundary as recall
-itself. The summary is in-memory (one entry per live session) and resets on
-restart, like the rest of the per-session diagnostic state.
+rejected candidates. The enrichment candidate pool is separate and larger; the
+summary is in-memory (one entry per live session) and resets on restart. `report`
+also totals distillation and enrichment calls/tokens per session. The automatic
+recall summary is consumed once by the turn-end enrichment, so an explicit tool
+query cannot overwrite the user's wording.
 
 ## Tuning retrieval
 
@@ -302,22 +282,22 @@ cost, which is what `recall.tokenBudget` bounds. The installed package ships
 `node test/tool.mjs` can be run from the installed copy; the bench scripts are
 source-checkout only.
 
-## Diagnostics and audience
+## Diagnostics
 
-`status` renders the recent event ring into the calling conversation, so it is
-audience-filtered: only events from this session (or global boot lines), and
-outside a private session only events explicitly marked public. Legacy free-text
-events have no audience and are hidden. Write, inject, probe, distill, and
-checkpoint-skip events are tagged with the audience of the session or record
-they describe.
+`status` renders recent events for the calling session plus global boot lines.
+Write, inject, probe, distill, enrich, link, and checkpoint-skip events are in
+the ring; there is no private/group audience filter because the store is shared.
+`status` also shows the store-wide counts, this session's ledger, the review
+hint, and a checkpoint left by another session.
 
 ## Ownership and the management boundary
 
-One DSH data root is one operator. `scope` is a retrieval boundary and, for
-`project` and `session` records, a management boundary: id-based operations and
+One DSH data root is one bot. `scope` is a retrieval boundary and, for `project`
+and `session` records, a management boundary: id-based operations and
 `supersedes` from another owner are reported as unknown, and `export` is scoped
 to the caller unless `all: true` is passed. `user` records are shared across the
-data root; `sensitivity` is a conversation-audience rule, not file ownership.
+data root. `sensitivity` is a content marker for an optional external owner
+guard, not a filter in this bundle and not file ownership.
 
 ## Hot reload
 
@@ -331,12 +311,15 @@ storage error; the next reload retries.
 
 ## Limitations
 
-- Retrieval is lexical, not semantic. A record whose vocabulary does not overlap
-  the user's wording will not surface; write triggers in the words you would use
-  to ask for it.
-- Recall is free of I/O only while no probe is due and the QQ bridge is off; a
-  due probe reads up to `probeMaxBytes` from the head plus 64 KiB from the tail,
-  asynchronously. The opt-in bridge stats its prefs file once per step. Five
+- Retrieval is lexical plus learned semantics. A record whose vocabulary does not
+  overlap the question misses its first recall; the failure-driven enrichment can
+  learn aliases only if the record is inside its bounded candidate window (8 by
+  default) and the model selects it. Otherwise use `link` or `write{aliases}`
+  explicitly. Alias matches add 0.7 trigger weight; confidence, freshness, and
+  feedback multipliers still decide the final order, so a literal match is not
+  guaranteed to precede an alias match.
+- Recall is free of I/O only while no probe is due; a due probe reads up to
+  `probeMaxBytes` from the head plus 64 KiB from the tail, asynchronously. Five
   probes per recall and 40 per sweep are hard caps. The sweep filters the whole
   store by due state before taking its batch, and a stale record that fails
   again still advances its check clock.
@@ -344,17 +327,18 @@ storage error; the next reload retries.
   probe are never automatically invalidated. A probe verdict is applied only if
   the record's probe is still the one that was read; a replaced probe ignores
   the late result.
-- Distillation is a single non-tool model call; it cannot read files. Its output
-  is evidence-checked only against the turn's own tool results — a candidate that
-  cites nothing, cites a failed call, or makes a behavioural claim without a
-  command that ran stays `proposed`.
+- Distillation and enrichment are non-tool model calls; neither can read files.
+  Distillation output is evidence-checked only against the turn's own tool
+  results — a candidate that cites nothing, cites a failed call, or makes a
+  behavioural claim without a command that ran stays `proposed`.
 - Self-reported confidence is not calibrated; a record written with
   `confidence: 0.9` by the model is trusted the same way as one written by hand.
   `set_confidence` makes correcting that cheap, but nothing corrects it
   automatically.
 - Measurement counters are per process until flushed at turn end; a hard crash
-  can lose the current turn's token counters. The distillation attempt itself is
-  reserved and persisted before the request, so a crash cannot refund it, and
-  the per-day reserve and last-attempt time are rebuilt from the ledger at start.
+  can lose the current turn's token counters. Distillation and enrichment
+  attempts are reserved and persisted before the request, so a crash cannot
+  refund them, and the per-day reserves and last-attempt times are rebuilt from
+  the ledger at start.
 - Disabling `memory-core` leaves existing data on disk (re-enabling resumes it)
   and makes `memory-distill` and `memory-probe` inactive until it returns.

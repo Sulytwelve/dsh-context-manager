@@ -50,6 +50,8 @@ const DEFAULTS = {
     enrichMaxPerSession: 4,
     enrichMaxPerDay: 6,
     enrichMinIntervalMs: 45_000,
+    enrichMaxCandidates: 8,
+    enrichMaxPromptTokens: 1_200,
     enrichMaxTokens: 500,
     enrichMaxRecords: 2,
     enrichTtlMs: 604_800_000,
@@ -373,8 +375,6 @@ async function distillWithModel(ctx, store, config, sample, level, budgets) {
         cwd: sample.cwd,
         origin: `distill:${level}`,
         sessionId: sample.sessionId,
-        // A candidate distilled from a private conversation stays private.
-        sensitivity: store.sessionVisibility(sample.sessionId) === 'private' ? 'private' : undefined,
         tags: ['distilled'],
       })
       written += 1
@@ -388,7 +388,6 @@ async function distillWithModel(ctx, store, config, sample, level, budgets) {
     `${level} call ${elapsed.toFixed(0)}ms, ${inputTokens}/${outputTokens} tok, `
       + `wrote ${written}/${candidates.length} (${promoted} supported by cited observations)`,
     sample.sessionId,
-    { private: store.sessionVisibility(sample.sessionId) === 'private' },
   )
   return written
 }
@@ -402,22 +401,16 @@ async function writeCheckpoint(store, sample) {
   })
   if (guard.action === 'skip') {
     // Do not lose state silently: another session's fresh checkpoint stays, and
-    // the skip is visible in the event ring. The detail names another session's
-    // id prefix, so it is audience-restricted like the checkpoint itself.
-    const existingPublic = existing?.sensitivity === 'public'
+    // the skip is visible in the event ring.
     await store.event(
       'checkpoint-skipped',
       `${guard.reason} (existing session ${String(existing?.sessionId ?? '?').slice(0, 8)}, ${Math.round((guard.ageMs ?? 0) / 60000)}m old)`,
       sample.sessionId,
-      { private: !existingPublic },
     )
     return
   }
 
   const lastError = sample.errors.slice(-1)[0]
-  // A private conversation keeps its checkpoint to itself: otherwise the
-  // session-level state would leak through `resume` from another session.
-  const isPrivate = store.sessionVisibility(sample.sessionId) === 'private'
   await store.checkpoint(sample.cwd, {
     milestone: oneLine(sample.userTexts[0] ?? sample.lastAssistant, 240),
     nextAction: existing?.nextAction ?? (sample.successAfterError ? undefined : 'continue from the last verified step'),
@@ -426,8 +419,6 @@ async function writeCheckpoint(store, sample) {
       : `${lastError.name} failed (${lastError.code}): ${lastError.reason}`,
     sessionId: sample.sessionId,
     turn: sample.turn,
-    private: isPrivate ? true : undefined,
-    sensitivity: isPrivate ? 'private' : 'public',
   })
 }
 
@@ -554,7 +545,6 @@ export async function apply(ctx, rawConfig) {
           startedAt: sample.startedAt,
           budgets,
           isSubagent: sample.origin === 'subagent',
-          visibility: store.sessionVisibility(sample.sessionId),
         }).catch(error => {
           store.log('warn', `enrichment failed: ${String(error?.message ?? error)}`)
         })
@@ -573,10 +563,7 @@ export async function apply(ctx, rawConfig) {
       }
 
       const level = analysis.score >= config.llm.deepThreshold ? 'deep' : 'short'
-      const privateSession = store.sessionVisibility(sessionId) === 'private'
-      void store.event('distill-plan', `${level} (score ${analysis.score}: ${analysis.reasons.join(',')})`, sessionId, {
-        private: privateSession,
-      })
+      void store.event('distill-plan', `${level} (score ${analysis.score}: ${analysis.reasons.join(',')})`, sessionId)
       void distillWithModel(ctx, store, config, sample, level, budgets).catch(error => {
         store.log('warn', `distill failed: ${String(error?.message ?? error)}`)
       })

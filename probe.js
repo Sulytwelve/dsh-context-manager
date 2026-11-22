@@ -9,7 +9,6 @@
  */
 
 import { checkContract } from './lib/contract.js'
-import { isPrivateRecord } from './lib/store.js'
 import { nowMs, oneLine, runProbe } from './lib/util.js'
 
 export const name = 'memory-probe'
@@ -87,9 +86,6 @@ export function apply(ctx, rawConfig) {
         checked += 1
         // A probe verdict is valid only for the probe version that was read;
         // markProbe ignores a result whose target changed while it ran.
-        const audience = {
-          private: isPrivateRecord(record) || record.sessionId === undefined,
-        }
         if (result.status === 'fail') {
           failed += 1
           const wasActive = record.status !== 'stale'
@@ -97,7 +93,7 @@ export function apply(ctx, rawConfig) {
           // Already-stale records still advance their check clock (above), but
           // only an actual transition emits an event.
           if (wasActive) {
-            await store.event('probe-stale', `${record.id}: ${result.detail}`, record.sessionId, audience)
+            await store.event('probe-stale', `${record.id}: ${result.detail}`, record.sessionId)
           }
         } else if (result.status === 'inconclusive') {
           // The check could not see the evidence (too large, unreadable, or
@@ -107,7 +103,7 @@ export function apply(ctx, rawConfig) {
         } else if (record.status === 'stale') {
           revived += 1
           await store.markProbe(record.id, 'pass', result.detail, record.probe)
-          await store.event('probe-revived', `${record.id}: ${result.detail}`, record.sessionId, audience)
+          await store.event('probe-revived', `${record.id}: ${result.detail}`, record.sessionId)
         } else {
           await store.markProbe(record.id, 'pass', result.detail, record.probe)
         }

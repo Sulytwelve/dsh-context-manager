@@ -3,8 +3,8 @@
  * Host, then exercise the registered `memory` tool the way a model would.
  *
  * The store-level suites test the store; this one tests the boundary the review
- * flagged: owner authorization, the audience shown by `status`, export scope,
- * import path/limit handling, and the bridge refreshing with recall off.
+ * flagged: owner authorization, the shared store shown by `status` and export,
+ * import path/limit handling, and the semantic dictionary through the tool.
  */
 
 import assert from 'node:assert/strict'
@@ -66,7 +66,7 @@ const exec = (sessionId, cwd) => ({ agent: agent(sessionId, cwd) })
 // ------------------------------------------------------------- core row
 
 const host = makeHost()
-await apply(host.ctx, { recall: { visibilityBridge: false } })
+await apply(host.ctx, {})
 check('the row registers the memory tool and the store', () => {
   assert.equal(host.tool?.name, 'memory')
   assert.equal(typeof host.store?.write, 'function')
@@ -104,24 +104,26 @@ check('export defaults to the caller’s owners; `all` is the operator-wide path
   assert.equal(header.total, 0)
 })
 
-// A private conversation's write defaults to private.
-host.store.setSessionVisibility('private-session', 'private')
+// One shared memory: a record marked private is still stored, recalled, and
+// exported from every conversation; the marker is only for an outer guard.
 const privateWrite = await host.tool.execute({
   op: 'write', scope: 'project', kind: 'preference',
-  trigger: 'a preference told only in a private chat',
-  claim: 'Private conversations must not leak what they teach into shared recall.',
-}, exec('private-session', projectA))
+  trigger: 'a preference told in one chat',
+  claim: 'A marked record is shared by every conversation of this bot.',
+  sensitivity: 'private',
+}, exec('session-one', projectA))
 const privateRecord = host.store.list({ limit: 20 })
-  .find(record => record.trigger === 'a preference told only in a private chat')
-check('a write in a private conversation defaults to private', () => {
+  .find(record => record.trigger === 'a preference told in one chat')
+check('a marked record is stored and shared across conversations', () => {
   assert.equal(privateRecord?.sensitivity, 'private')
-  assert.match(privateWrite.text, /private/)
+  assert.match(privateWrite.text, /stored mem_/)
 })
 
-const status = await host.tool.execute({ op: 'status' }, exec('session-public', projectA))
-check('a public status shows neither the private record nor its diagnostic', () => {
-  assert.equal(status.text.includes(privateRecord.id.slice(-6)), false)
-  assert.equal(status.text.includes('a preference told only in a private chat'), false)
+const status = await host.tool.execute({ op: 'status' }, exec('session-two', projectA))
+const sharedRecall = await host.tool.execute({ op: 'recall', query: 'a preference told in one chat' }, exec('session-two', projectA))
+check('another session sees the same store and recalls the marked record', () => {
+  assert.equal(status.text.includes('privacy:'), false)
+  assert.match(sharedRecall.text, /a preference told in one chat/)
 })
 
 // Import: a relative path resolves against the calling session's directory.
@@ -170,30 +172,19 @@ check('link with remove deletes the learned group', () => {
   assert.equal(host.store.stats().concepts, 0)
 })
 
-// ---------------------------------------------- bridge refresh with recall off
-
-const prefs = join(root, 'model-prefs.json')
-const bridgeHost = makeHost()
-await apply(bridgeHost.ctx, {
-  recall: { enabled: false, visibilityBridge: true, visibilityBridgePath: prefs },
-})
-const preStep = bridgeHost.listeners.get('agent/pre-step')
-writeFileSync(prefs, JSON.stringify({ sessionIds: { 'qqbot:1:c2c:peer': 'bridge-session' } }))
-await preStep(
-  { agent: agent('bridge-session', projectA), step: 1, turn: 1 },
-  async () => ({ kind: 'accept', messages: [] }),
-)
-check('the bridge refreshes even when automatic recall is off', () => {
-  assert.equal(bridgeHost.store.sessionVisibility('bridge-session'), 'private')
-})
-const preStep2 = bridgeHost.listeners.get('agent/pre-step')
-writeFileSync(prefs, JSON.stringify({ sessionIds: {} }))
-await preStep2(
-  { agent: agent('bridge-session', projectA), step: 1, turn: 2 },
-  async () => ({ kind: 'accept', messages: [] }),
-)
-check('removing the mapping withdraws the bridge declaration', () => {
-  assert.equal(bridgeHost.store.sessionVisibility('bridge-session'), 'public')
+// One shared store: the same export arguments produce the same records and
+// concept rows from any conversation.
+await host.tool.execute({ op: 'link', forms: ['导出组甲', 'exportfixture'] }, exec('session-b', projectA))
+const exportA = await host.tool.execute({ op: 'export', limit: 100 }, exec('session-a', projectA))
+const exportB = await host.tool.execute({ op: 'export', limit: 100 }, exec('session-b', projectA))
+check('the same export from two sessions has the same shared content', () => {
+  const bodyA = exportA.text.split('\n').slice(1)
+  const bodyB = exportB.text.split('\n').slice(1)
+  assert.deepEqual(bodyA, bodyB)
+  assert.ok(bodyA.some(line => line.includes('"type":"concept"')))
+  const header = JSON.parse(exportA.text.split('\n')[0])
+  assert.equal('privateOmitted' in header, false)
+  assert.equal('conceptsOmitted' in header, false)
 })
 
 await check.report('tool')

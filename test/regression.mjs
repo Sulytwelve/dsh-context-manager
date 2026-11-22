@@ -1,10 +1,11 @@
 /**
- * Regression tests for the three correctness fixes:
+ * Regression tests for the store and its semantics:
  *
  * 1. scope isolation (write-time merge, recall, index rebuild, legacy records);
  * 2. probe scheduling (zero TTL, least-recently-checked sweep, front-line budget);
  * 3. distillation support (cited tool results decide `active` vs `proposed`,
- *    and a claim version is replaced as one unit).
+ *    and a claim version is replaced as one unit);
+ * 4. shared memory, aliases, concept groups, and failure-driven enrichment.
  */
 
 import assert from 'node:assert/strict'
@@ -19,13 +20,12 @@ import { checkContract } from '../lib/contract.js'
 import { openDomainWithRetry } from '../lib/domain-open.js'
 import { buildEnrichPrompt, enrichAfterFailure, parseEnrichResult } from '../lib/enrich.js'
 import { stemLatin } from '../lib/lexicon.js'
-import { applySessionScopes, bridgeStamp, qqbotScopeOfSessionKey, qqbotSessionScopes, readQqbotSessionScopes } from '../lib/visibility-bridge.js'
 import { normalizeCwdOn, estimateTokens, runProbe, safeKey, normalizeCwd } from '../lib/util.js'
 import { ownerFor } from '../lib/store.js'
 import { probeDue, selectProbeCandidates } from '../lib/probe-plan.js'
 import { evaluateSupport, toolClass } from '../lib/support.js'
 import { buildPacket, recallEnabled, rejectReportLines, reviewLines } from '../index.js'
-import { createChecker, makeStore, reopen, TEST_CONFIG } from './harness.mjs'
+import { createChecker, makeStore, reopen } from './harness.mjs'
 
 const check = createChecker()
 const root = mkdtempSync(join(tmpdir(), 'memory-regression-'))
@@ -798,10 +798,10 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
   })
 }
 
-// ------------------------------------------------------ private sensitivity
+// ------------------------------------------------------------ shared memory
 
 {
-  const { store } = makeStore()
+  const { store, domain } = makeStore()
   const privateRecord = await store.write({
     scope: 'user',
     kind: 'preference',
@@ -821,228 +821,38 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     origin: 'test',
   })
 
-  const autoPublic = await store.recall({
+  const shared = await store.recall({
     query: 'personal photos and private messages',
-    gatePrivate: true,
-    visibility: 'public',
     probeOnRecall: false,
   })
-  check('a private record is withheld from automatic recall in a public session', () => {
-    assert.equal(autoPublic.items.length, 0)
-    assert.equal(autoPublic.gatedPrivate, 1)
+  check('a flagged record is recalled in every conversation (shared memory)', () => {
+    assert.equal(shared.items.length, 1)
+    // The marker is still rendered for an optional outer guard, but it never
+    // gates this store.
+    assert.match(shared.items[0].line, / private /)
   })
 
-  const explicit = await store.recall({
-    query: 'personal photos and private messages',
-    gatePrivate: false,
-    probeOnRecall: false,
-  })
-  check('an explicit recall still returns a private record, marked as private', () => {
-    assert.equal(explicit.items.length, 1)
-    assert.match(explicit.items[0].line, / private /)
-  })
-
-  const autoPrivate = await store.recall({
-    query: 'personal photos and private messages',
-    gatePrivate: true,
-    visibility: 'private',
-    probeOnRecall: false,
-  })
-  check('a session declared private does receive it', () => {
-    assert.equal(autoPrivate.items.length, 1)
-    assert.equal(autoPrivate.gatedPrivate, 0)
-  })
-
-  check('session visibility is explicit and defaults to public', () => {
-    assert.equal(store.sessionVisibility('s1'), 'public')
-    store.setSessionVisibility('s1', 'private')
-    assert.equal(store.sessionVisibility('s1'), 'private')
-    store.setSessionVisibility('s1', 'public')
-    assert.equal(store.sessionVisibility('s1'), 'public')
-  })
-
-  check('config can declare a private session before it starts', () => {
-    const seeded = makeStore({ ...TEST_CONFIG, recall: { privateSessions: ['seed-session'] } })
-    assert.equal(seeded.store.sessionVisibility('seed-session'), 'private')
-    assert.equal(seeded.store.sessionVisibility('other'), 'public')
-  })
-
-  check('export carries the sensitivity marker', () => {
+  check('export includes every record and keeps the sensitivity marker', () => {
+    const result = store.exportRecords({})
+    assert.equal(result.total, 2)
     assert.equal(store.exportRow(privateRecord.record).sensitivity, 'private')
   })
 
-  check('a public export omits private records and reports how many', () => {
-    const result = store.exportRecords({ includePrivate: false })
-    assert.equal(result.omitted, 1)
-    assert.equal(result.rows.some(record => record.id === privateRecord.record.id), false)
-  })
-}
-
-// -------------------------------------- legacy default, review, and precedence
-
-{
-  const { store } = makeStore()
-  await store.write({
-    scope: 'user',
-    kind: 'preference',
-    trigger: 'legacy personal habit',
-    claim: 'He prefers a quiet room when working late.',
-    origin: 'test',
-  })
-  const gated = await store.recall({
-    query: 'prefers a quiet room when working late',
-    gatePrivate: true,
-    visibility: 'public',
-    probeOnRecall: false,
-  })
-  check('an unclassified personal preference is treated as private', () => {
-    assert.equal(gated.items.length, 0)
-    assert.equal(gated.gatedPrivate, 1)
-  })
-
-  await store.write({
-    scope: 'user',
-    kind: 'preference',
-    trigger: 'legacy personal habit',
-    claim: 'He prefers a quiet room when working late.',
-    sensitivity: 'public',
-    origin: 'test',
-  })
-  const reviewed = await store.recall({
-    query: 'prefers a quiet room when working late',
-    gatePrivate: true,
-    visibility: 'public',
-    probeOnRecall: false,
-  })
-  check('an explicit public review makes a legacy preference shareable', () => {
-    assert.equal(reviewed.items.length, 1)
-  })
-
-  check('a public declaration beats a conflicting private one', () => {
-    const { store: scoped } = makeStore()
-    scoped.setSessionVisibility('channel-1', 'private')
-    assert.equal(scoped.sessionVisibility('channel-1'), 'private')
-    scoped.setSessionVisibility('channel-1', 'public')
-    assert.equal(scoped.sessionVisibility('channel-1'), 'public')
-    scoped.setSessionVisibility('channel-1', 'private')
-    assert.equal(scoped.sessionVisibility('channel-1'), 'public')
-  })
-}
-
-// --------------------------------------------------- private checkpoint keys
-
-{
-  const { store, domain } = makeStore()
-  const cwd = join(root, 'private-cwd')
+  const cwd = join(root, 'shared-cwd')
   mkdirSync(cwd, { recursive: true })
   await store.checkpoint(cwd, {
-    milestone: 'private task state',
-    nextAction: 'continue privately',
+    milestone: 'shared task state',
+    nextAction: 'continue from here',
     sessionId: 'session-a',
-    private: true,
   })
-
-  check('a private checkpoint is readable only by the session that wrote it', () => {
-    assert.equal(store.getCheckpoint(cwd, 'session-a')?.milestone, 'private task state')
-    assert.equal(store.getCheckpoint(cwd, 'session-b'), undefined)
-    assert.equal(store.getCheckpoint(cwd), undefined)
-  })
-
-  await store.checkpoint(cwd, { milestone: 'shared task state', sessionId: 'session-b' })
-  check('a shared checkpoint coexists with another session’s private one', () => {
+  check('one checkpoint per directory is visible to every session', () => {
+    assert.equal(store.getCheckpoint(cwd, 'session-a')?.milestone, 'shared task state')
     assert.equal(store.getCheckpoint(cwd, 'session-b')?.milestone, 'shared task state')
-    assert.equal(store.getCheckpoint(cwd, 'session-a')?.milestone, 'private task state')
   })
 
-  const legacyCwd = join(root, 'legacy-cwd')
-  mkdirSync(legacyCwd, { recursive: true })
-  await domain.table('tasks').put(safeKey(normalizeCwd(legacyCwd)), {
-    cwd: legacyCwd,
-    milestone: 'legacy state from before classification',
-    sessionId: 'old-session',
-    updatedAt: Date.now(),
-  })
-  check('a legacy checkpoint with unknown sensitivity is withheld from other sessions', () => {
-    assert.equal(store.getCheckpoint(legacyCwd, 'old-session')?.milestone, 'legacy state from before classification')
-    assert.equal(store.getCheckpoint(legacyCwd, 'new-session'), undefined)
-    assert.equal(store.hasWithheldCheckpoint(legacyCwd, 'new-session'), true)
-    assert.equal(store.hasWithheldCheckpoint(legacyCwd, 'old-session'), false)
-  })
-
-  // The durable read boundary is where the 1.6.0 bug bit: `sensitivity` was not
-  // declared on the task schema, so a public checkpoint reopened as "unknown"
-  // and was withheld from every other session. Reopen against the same tables
-  // and re-check all three classifications.
   const reopened = reopen(domain)
-  await check('a public checkpoint stays readable to other sessions after a reopen', () => {
+  await check('a shared checkpoint survives a reopen', () => {
     assert.equal(reopened.getCheckpoint(cwd, 'session-c')?.milestone, 'shared task state')
-    assert.equal(reopened.hasWithheldCheckpoint(cwd, 'session-c'), false)
-  })
-  await check('a private checkpoint stays private (and present) after a reopen', () => {
-    assert.equal(reopened.getCheckpoint(cwd, 'session-a')?.milestone, 'private task state')
-    // Another session sees the shared checkpoint, never the private one.
-    assert.equal(reopened.getCheckpoint(cwd, 'session-c')?.milestone, 'shared task state')
-    assert.equal(reopened.getCheckpoint(cwd, 'session-a')?.sensitivity, 'private')
-  })
-  await check('a legacy checkpoint is still withheld after a reopen', () => {
-    assert.equal(reopened.getCheckpoint(legacyCwd, 'new-session'), undefined)
-    assert.equal(reopened.getCheckpoint(legacyCwd, 'old-session')?.milestone, 'legacy state from before classification')
-  })
-}
-
-// ---------------------------------------------- QQ bot visibility bridge
-
-{
-  const { store } = makeStore()
-  const prefs = {
-    sessionIds: {
-      'qqbot:10001:c2c:peer-a': 'session-aaa',
-      'qqbot:10001:group:group-b': 'session-bbb',
-      'some-other-plugin:10001:c2c:peer-c': 'session-ccc',
-      'qqbot:10001:c2c:': '',
-    },
-  }
-
-  check('the QQ prefs map turns c2c into private and group into public', () => {
-    const scopes = qqbotSessionScopes(prefs)
-    assert.equal(scopes.get('session-aaa'), 'private')
-    assert.equal(scopes.get('session-bbb'), 'public')
-    assert.equal(scopes.has('session-ccc'), false)
-    assert.equal(scopes.size, 2)
-  })
-
-  await check('a missing or malformed prefs file is a no-op', async () => {
-    assert.equal((await readQqbotSessionScopes(join(root, 'no-such-prefs.json'))).size, 0)
-    const broken = join(root, 'broken-prefs.json')
-    writeFileSync(broken, '{ not json')
-    assert.equal((await readQqbotSessionScopes(broken)).size, 0)
-  })
-
-  check('applying the map declares only the sessions it knows', () => {
-    const applied = applySessionScopes(store, qqbotSessionScopes(prefs))
-    assert.equal(applied, 2)
-    assert.equal(store.sessionVisibility('session-aaa'), 'private')
-    assert.equal(store.sessionVisibility('session-bbb'), 'public')
-    assert.equal(store.sessionVisibility('unknown-session'), 'public')
-  })
-
-  check('QQ session keys are parsed defensively', () => {
-    assert.equal(qqbotScopeOfSessionKey('qqbot:9:c2c:x'), 'private')
-    assert.equal(qqbotScopeOfSessionKey('qQbOt:9:GROUP:x'), 'public')
-    assert.equal(qqbotScopeOfSessionKey('qqbot:9:channel:x'), undefined)
-    assert.equal(qqbotScopeOfSessionKey(undefined), undefined)
-    assert.equal(qqbotScopeOfSessionKey(''), undefined)
-  })
-
-  await check('the bridge re-reads only when the preference file changes', async () => {
-    const path = join(root, 'bridge-stamp.json')
-    assert.equal(await bridgeStamp(path), 'missing')
-    writeFileSync(path, '{"sessionIds":{}}')
-    const first = await bridgeStamp(path)
-    assert.notEqual(first, 'missing')
-    assert.equal(await bridgeStamp(path), first)
-    writeFileSync(path, '{"sessionIds":{"qqbot:1:c2c:x":"session-1"}}')
-    assert.notEqual(await bridgeStamp(path), first)
   })
 }
 
@@ -1112,12 +922,12 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     cwd: projectA,
     origin: 'test',
   })
-  const privatePreference = await store.write({
-    scope: 'user',
-    kind: 'preference',
-    trigger: 'alpha personal habit',
-    claim: 'Prefers alpha builds when testing quietly at night.',
-    sensitivity: 'private',
+  await store.write({
+    scope: 'project',
+    kind: 'fact',
+    trigger: 'unrelated beta note',
+    claim: 'Beta fixtures live under build/beta on the build machine.',
+    cwd: projectA,
     origin: 'test',
   })
 
@@ -1125,27 +935,21 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     query: 'alpha release checklist',
     cwd: projectA,
     sessionId: 'reject-session',
-    gatePrivate: true,
-    visibility: 'public',
     probeOnRecall: false,
   })
   check('recall reports why candidates were rejected', () => {
     assert.ok((result.rejectedByReason['no-term-overlap'] ?? 0) >= 1)
-    assert.equal(result.rejectedByReason.private, 1)
+    assert.equal(result.rejectedByReason.private, undefined)
     assert.ok(result.rejectedTop.length >= 1)
     assert.ok(result.rejectedTop.every(item => typeof item.reason === 'string'))
-    assert.ok(result.rejectedTop.some(item => item.reason === 'private'))
-    assert.equal(store.rejectsOf('reject-session')?.byReason.private, 1)
+    assert.equal(store.rejectsOf('reject-session')?.byReason.private, undefined)
   })
 
-  check('report names a private-gated record only as withheld outside a private session', () => {
+  check('report renders the last recall rejection without per-conversation redaction', () => {
     const entry = store.rejectsOf('reject-session')
-    const publicText = rejectReportLines(entry, 'public').join('\n')
-    assert.match(publicText, /private 1/)
-    assert.match(publicText, /\[withheld private\]/)
-    assert.equal(publicText.includes(privatePreference.record.id.slice(-6)), false)
-    const privateText = rejectReportLines(entry, 'private').join('\n')
-    assert.equal(privateText.includes(privatePreference.record.id.slice(-6)), true)
+    const text = rejectReportLines(entry).join('\n')
+    assert.match(text, /no-overlap/)
+    assert.equal(text.includes('withheld'), false)
   })
 
   const source = makeStore().store
@@ -1303,28 +1107,26 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
   })
 }
 
-// --------------------------------------------- diagnostics audience filtering
+// ------------------------------------------------- shared event diagnostics
 
 {
   const { store } = makeStore()
-  await store.event('write', 'created mine (private) mem_aaaaaa', 'private-session', { private: true })
-  await store.event('write', 'created ours mem_bbbbbb', 'public-session', { private: false })
-  await store.event('legacy', 'old free text mem_cccccc', 'public-session')
-  await store.event('boot', 'memory core ready', undefined, { private: false })
+  await store.event('write', 'created mine mem_aaaaaa', 'session-a')
+  await store.event('write', 'created theirs mem_bbbbbb', 'session-b')
+  await store.event('boot', 'memory core ready', undefined)
 
-  check('a public session never sees another session’s private diagnostics', () => {
-    const visible = store.recentEvents(10, { sessionId: 'public-session', visibility: 'public' })
+  check('a session sees its own diagnostics and global boot lines', () => {
+    const visible = store.recentEvents(10, { sessionId: 'session-a' })
     const text = visible.map(item => item.detail).join('|')
-    assert.equal(text.includes('mem_aaaaaa'), false)
-    assert.equal(text.includes('mem_bbbbbb'), true)
-    // Legacy free text has no audience; it is hidden outside a private session.
-    assert.equal(text.includes('mem_cccccc'), false)
+    assert.equal(text.includes('mem_aaaaaa'), true)
+    assert.equal(text.includes('mem_bbbbbb'), false)
     assert.equal(text.includes('memory core ready'), true)
   })
 
-  check('a private session sees its own private diagnostics', () => {
-    const visible = store.recentEvents(10, { sessionId: 'private-session', visibility: 'private' })
-    assert.equal(visible.some(item => item.detail.includes('mem_aaaaaa')), true)
+  check('another session sees its own diagnostics', () => {
+    const visible = store.recentEvents(10, { sessionId: 'session-b' })
+    assert.equal(visible.some(item => item.detail.includes('mem_bbbbbb')), true)
+    assert.equal(visible.some(item => item.detail.includes('mem_aaaaaa')), false)
   })
 }
 
@@ -1430,7 +1232,7 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
   })
 }
 
-// ------------------------------------ owner boundaries, bridge, import guards
+// ------------------------------------------ owner boundaries and import guards
 
 {
   const { store } = makeStore()
@@ -1451,29 +1253,6 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
   }
   check('supersedes cannot retire a record from another owner', () => {
     assert.match(String(crossOwner?.message), /same owner/)
-  })
-}
-
-{
-  const { store } = makeStore()
-  applySessionScopes(store, new Map([['bridge-a', 'private'], ['bridge-b', 'public']]))
-  check('the bridge declares both scopes', () => {
-    assert.equal(store.sessionVisibility('bridge-a'), 'private')
-    assert.equal(store.sessionVisibility('bridge-b'), 'public')
-  })
-  applySessionScopes(store, new Map([['bridge-a', 'public']]))
-  check('replacing the bridge snapshot withdraws a mapping that disappeared', () => {
-    assert.equal(store.sessionVisibility('bridge-a'), 'public')
-    assert.equal(store.sessionVisibility('bridge-b'), 'public')
-  })
-  check('a conflicting c2c and group mapping resolves to public', () => {
-    const scopes = qqbotSessionScopes({ sessionIds: { 'qqbot:1:c2c:x': 'same', 'qqbot:1:group:y': 'same' } })
-    assert.equal(scopes.get('same'), 'public')
-  })
-  const seeded = makeStore({ ...TEST_CONFIG, recall: { privateSessions: ['seeded-session'] } })
-  applySessionScopes(seeded.store, new Map())
-  check('the bridge snapshot never erases a config-declared private session', () => {
-    assert.equal(seeded.store.sessionVisibility('seeded-session'), 'private')
   })
 }
 
@@ -1624,20 +1403,72 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
 
 {
   const { store } = makeStore()
-
-  await store.linkForms({ forms: ['甲乙', '丙丁'], origin: 'test' })
-  await store.linkForms({ forms: ['丙丁', '戊己'], origin: 'test' })
-  check('overlapping groups merge into one learned group', () => {
+  await store.linkForms({ forms: ['backups', '甲组'], origin: 'test' })
+  await store.linkForms({ forms: ['backup', '乙组'], origin: 'test' })
+  check('stem-equivalent forms merge into one logical group', () => {
     assert.equal(store.stats().concepts, 1)
-    assert.deepEqual(store.exportConcepts()[0].forms.sort(), ['丙丁', '戊己', '甲乙'].sort())
+    const forms = store.exportConcepts()[0].forms
+    assert.deepEqual(forms.sort(), ['backups', 'backup', '乙组', '甲组'].sort())
   })
-
-  const removed = await store.removeConcepts(['丙丁'])
-  check('unlink removes the group holding the form', () => {
-    assert.equal(removed, 1)
-    assert.equal(store.stats().concepts, 0)
+  await store.write({
+    scope: 'project', kind: 'fact',
+    trigger: 'backup policy', claim: 'A backup policy record long enough to retrieve.',
+    cwd: projectA, origin: 'test',
+  })
+  await check('both sides of a stem merge recall the same record', async () => {
+    const chinese = await store.recall({ query: '乙组', cwd: projectA, minRelevance: 1 })
+    const latin = await store.recall({ query: 'backups', cwd: projectA, minRelevance: 1 })
+    assert.ok(chinese.items.length >= 1)
+    assert.ok(latin.items.length >= 1)
   })
 }
+
+{
+  // The merge key must not over-merge two different CJK phrases just because
+  // one contains the other; retrieval still matches them as substrings.
+  const { store } = makeStore()
+  await store.linkForms({ forms: ['密码', '甲组'], origin: 'test' })
+  await store.linkForms({ forms: ['密码库', '乙组'], origin: 'test' })
+  check('different CJK phrases stay separate groups', () => {
+    assert.equal(store.stats().concepts, 2)
+  })
+}
+
+{
+  // A legacy/double-written store can hold two groups with the same stem; the
+  // index maps both instead of shadowing the later one.
+  const { store, domain } = makeStore()
+  await domain.table('concepts').put('cpt_legacy_a', {
+    id: 'cpt_legacy_a', forms: ['backups', '旧甲'], createdAt: 1, updatedAt: 1,
+  })
+  await domain.table('concepts').put('cpt_legacy_b', {
+    id: 'cpt_legacy_b', forms: ['backup', '旧乙'], createdAt: 2, updatedAt: 2,
+  })
+  const reopened = reopen(domain)
+  await reopened.write({
+    scope: 'project', kind: 'fact',
+    trigger: 'legacy backup fixture', claim: 'Legacy stem conflicts still retrieve both forms.',
+    cwd: projectA, origin: 'test',
+  })
+  await check('a legacy stem conflict is readable from both groups', async () => {
+    const first = await reopened.recall({ query: '旧甲', cwd: projectA, minRelevance: 1 })
+    const second = await reopened.recall({ query: '旧乙', cwd: projectA, minRelevance: 1 })
+    assert.ok(first.items.length >= 1)
+    assert.ok(second.items.length >= 1)
+  })
+}
+
+{
+  const { store } = makeStore()
+  await store.recall({ query: '清理诊断', cwd: projectA, sessionId: 's-clear', source: 'auto' })
+  check('clearRejects drops both report and auto summaries', () => {
+    assert.ok(store.rejectsOf('s-clear') !== undefined)
+    store.clearRejects('s-clear')
+    assert.equal(store.rejectsOf('s-clear'), undefined)
+    assert.equal(store.takeAutoRejects('s-clear'), undefined)
+  })
+}
+
 
 {
   const { store, domain } = makeStore()
@@ -1694,10 +1525,15 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.deepEqual(parsed.records, [{ id: 'a', aliases: ['好别名', 'xy'] }])
     assert.deepEqual(parsed.links, [['甲乙', '丙丁']])
     assert.deepEqual(parseEnrichResult('not json'), { records: [], links: [] })
+    // A multi-word Latin form cannot be a link form; the valid member stays.
+    assert.deepEqual(
+      parseEnrichResult('{"records":[],"links":[["password vault","密码库"],["ok1","密码库"]]}').links,
+      [['ok1', '密码库']],
+    )
   })
 
   // A recall that misses: the Chinese wording shares nothing with the record.
-  const coldMiss = await store.recall({ query: '密码库怎么导出', cwd: projectA, sessionId: 's-enrich' })
+  const coldMiss = await store.recall({ query: '密码库怎么导出', cwd: projectA, sessionId: 's-enrich', source: 'auto' })
   assert.equal(coldMiss.items.length, 0)
 
   const fakeLlm = {
@@ -1727,15 +1563,16 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     llm: {
       enabled: true, enrich: true,
       enrichMaxPerSession: 4, enrichMaxPerDay: 6, enrichMinIntervalMs: 0,
+      enrichMaxCandidates: 8, enrichMaxPromptTokens: 1_200,
       enrichMaxTokens: 500, enrichMaxRecords: 2, enrichTtlMs: 604_800_000,
     },
   }
   const budgets = { enrichDay: '', enrichCalls: 0, enrichBySession: new Map(), enrichLastAt: new Map() }
   const outcome = await enrichAfterFailure({
-    ctx, store, config, sessionId: 's-enrich', startedAt: 0, budgets, visibility: 'public',
+    ctx, store, config, sessionId: 's-enrich', startedAt: 0, budgets,
   })
 
-  check('a missed recall spends one enrich call and writes aliases plus a learned group', () => {
+  check('a missed auto recall spends one enrich call and writes aliases plus a learned group', () => {
     assert.equal(fakeLlm.calls, 1)
     assert.ok(outcome.enriched >= 1)
     assert.ok(outcome.linked >= 1)
@@ -1756,8 +1593,9 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
     assert.equal(ledger.enrichOutputTokens, 60)
   })
 
+  await store.recall({ query: '完全无关的另一句话', cwd: projectA, sessionId: 's-enrich', source: 'auto' })
   const again = await enrichAfterFailure({
-    ctx, store, config, sessionId: 's-enrich', startedAt: 0, budgets, visibility: 'public',
+    ctx, store, config, sessionId: 's-enrich', startedAt: 0, budgets,
   })
   check('a record enriched once is not re-billed within the cooldown', () => {
     assert.equal(again.reason, 'no-targets')
@@ -1767,34 +1605,38 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
   check('enrichment stays off with the model call disabled', async () => {
     const off = await enrichAfterFailure({
       ctx, store, config: { includeSubagents: true, llm: { enabled: false, enrich: true } },
-      sessionId: 's-enrich', startedAt: 0, budgets, visibility: 'public',
+      sessionId: 's-enrich', startedAt: 0, budgets,
     })
     assert.equal(off.reason, 'disabled')
   })
 }
 
 {
-  // The audience rule outranks the repair: a private record's text never goes
-  // to a model call made from a public conversation, even when it is the one
-  // that missed.
+  // The reported field failure: seven records, the target fourth, a pure
+  // cross-language question with no shared term. The old top-three window
+  // never showed the target to the model; the enrichment candidate pool must.
   const { store } = makeStore()
-  store.setSessionVisibility('s-private', 'private')
-  await store.write({
-    scope: 'project', kind: 'preference',
-    trigger: '隐私触发的专属说法',
-    claim: 'A private record must not be sent to a model from a public chat.',
-    sensitivity: 'private',
-    cwd: projectA, origin: 'test',
+  const write = (trigger, claim) => store.write({
+    scope: 'project', kind: 'fact', trigger, claim, cwd: projectA, origin: 'test',
   })
-  const missed = await store.recall({ query: '毫无关联的词句', cwd: projectA, sessionId: 's-private', visibility: 'private' })
-  assert.equal(missed.items.length, 0)
-  assert.ok((store.rejectsOf('s-private').top ?? []).some(entry => entry.reason === 'no-term-overlap'))
+  await write('代理服务的重启步骤', 'Restart the proxy with systemctl restart nginx-proxy.')
+  await write('玩客云盒子 ssh 连不上的排查', 'The box drops ssh when the MTU is wrong; set MTU 1400.')
+  await write('手机热点连不上时切换信道', 'Channel congestion; switch the hotspot to channel 36.')
+  const vault = await write('vaultwarden backups are encrypted weekly', 'The vaultwarden backup job encrypts every archive before upload.')
+  await write('R2 存储桶的备份策略', 'R2 buckets use lifecycle rules, not scripts.')
+  await write('加密照片包的备份位置', 'Encrypted photo archives live on the NAS.')
+  await write('Hermes 旧数据的备份归档', 'Old Hermes data is archived in cold storage.')
 
+  const missed = await store.recall({ query: '密码库在哪', cwd: projectA, sessionId: 's-pool', source: 'auto' })
+  assert.equal(missed.items.length, 0)
+  const rejects = store.rejectsOf('s-pool')
+  assert.ok((rejects?.enrichCandidates ?? []).some(entry => entry.id === vault.record.id))
+
+  let promptSeen = ''
   const fakeLlm = {
-    calls: 0,
-    async *stream() {
-      fakeLlm.calls += 1
-      yield { type: 'text-delta', text: '{"records":[],"links":[]}' }
+    async *stream(options) {
+      promptSeen = options.messages[0].content[0].text
+      yield { type: 'text-delta', text: JSON.stringify({ records: [], links: [] }) }
       yield { type: 'finish', reason: { kind: 'stop' } }
     },
   }
@@ -1812,16 +1654,65 @@ writeFileSync(join(projectB, 'check.mjs'), 'export const command = "--suite=all 
       llm: {
         enabled: true, enrich: true,
         enrichMaxPerSession: 4, enrichMaxPerDay: 6, enrichMinIntervalMs: 0,
+        enrichMaxCandidates: 8, enrichMaxPromptTokens: 1_200,
         enrichMaxTokens: 500, enrichMaxRecords: 2, enrichTtlMs: 604_800_000,
       },
     },
-    sessionId: 's-private', startedAt: 0,
+    sessionId: 's-pool', startedAt: 0,
     budgets: { enrichDay: '', enrichCalls: 0, enrichBySession: new Map(), enrichLastAt: new Map() },
-    visibility: 'public',
   })
-  check('a private record is never enriched from a public conversation', () => {
-    assert.equal(outcome.reason, 'no-targets')
-    assert.equal(fakeLlm.calls, 0)
+  check('a pure cross-language miss puts the target record in the model prompt', () => {
+    assert.match(promptSeen, new RegExp(vault.record.id))
+    assert.match(promptSeen, /vaultwarden backups/)
+    assert.ok(outcome.candidates >= 2)
+    // The stub chose nothing: no dictionary or alias may be written.
+    assert.equal(store.stats().concepts, 0)
+    assert.equal(store.get(vault.record.id).aliases, undefined)
+  })
+}
+
+{
+  // Explicit tool recall must not overwrite the user's automatic miss.
+  const { store } = makeStore()
+  await store.write({
+    scope: 'project', kind: 'fact',
+    trigger: 'unrelated fixture word',
+    claim: 'An unrelated fixture claim long enough to store.',
+    cwd: projectA, origin: 'test',
+  })
+  await store.recall({ query: '用户原话完全无关', cwd: projectA, sessionId: 's-source', source: 'auto' })
+  await store.recall({ query: 'unrelated fixture word', cwd: projectA, sessionId: 's-source', source: 'tool' })
+  let seen = ''
+  const ctx = {
+    get: name => (name === 'llm'
+      ? {
+        async *stream(options) {
+          seen = options.messages[0].content[0].text
+          yield { type: 'text-delta', text: '{"records":[],"links":[]}' }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        },
+      }
+      : name === 'agentDefaultModel'
+        ? { currentSelection: () => ({ provider: 'fake', model: 'fake-model' }) }
+        : undefined),
+  }
+  await enrichAfterFailure({
+    ctx, store,
+    config: {
+      includeSubagents: true,
+      llm: {
+        enabled: true, enrich: true,
+        enrichMaxPerSession: 4, enrichMaxPerDay: 6, enrichMinIntervalMs: 0,
+        enrichMaxCandidates: 8, enrichMaxPromptTokens: 1_200,
+        enrichMaxTokens: 500, enrichMaxRecords: 2, enrichTtlMs: 604_800_000,
+      },
+    },
+    sessionId: 's-source', startedAt: 0,
+    budgets: { enrichDay: '', enrichCalls: 0, enrichBySession: new Map(), enrichLastAt: new Map() },
+  })
+  check('a successful tool recall does not replace the auto-cleared user wording', () => {
+    assert.match(seen, /USER QUESTION: 用户原话完全无关/)
+    assert.equal(seen.includes('USER QUESTION: unrelated fixture word'), false)
   })
 }
 

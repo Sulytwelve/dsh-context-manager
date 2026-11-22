@@ -42,6 +42,8 @@
           enrichMaxPerSession: 4
           enrichMaxPerDay: 6
           enrichMinIntervalMs: 45000
+          enrichMaxCandidates: 8
+          enrichMaxPromptTokens: 1200
           enrichMaxTokens: 500
           enrichMaxRecords: 2
           enrichTtlMs: 604800000

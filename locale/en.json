@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "DSH Context Manager",
-    "description": "Context management for DeepSeek Harness: recalls relevant project knowledge on demand, revalidates the evidence behind it, and restores tasks across sessions. Records are scoped to a user, a project directory, or a session; three independently switchable rows keep the cost bounded.",
+    "description": "Context management for DeepSeek Harness: recalls relevant project knowledge on demand, revalidates the evidence behind it, and restores tasks across sessions. One bot has one shared memory across private and group conversations; three independently switchable rows keep the cost bounded.",
     "detail": "docs/DETAIL.md"
   },
   "rows": {

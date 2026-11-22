@@ -6,6 +6,11 @@
 > the design pays for itself" are this plugin's acceptance plan; the delivered
 > implementation is tracked in `CHANGELOG.md`, which records where the
 > implementation and the measurement results differ from the plan.
+>
+> **Superseded in 1.7.0.** The "Audience and ownership" section below is the
+> original design prompt, not current behavior: 1.7.0 deliberately uses one
+> shared memory for the whole bot and does not split private and group
+> conversations. The current contract is in `README.md` and `docs/DETAIL.md`.
 
 Design a long-running coding agent that uses an LLM such as DeepSeek for reasoning and tool selection. Assume I will build it myself. Choose components that fit my runtime and explain the interfaces I need to implement. If I have supplied a codebase, inspect its actual storage, tool, event, and model-call contracts before naming integration points. Otherwise describe those interfaces in provider-neutral terms.
 

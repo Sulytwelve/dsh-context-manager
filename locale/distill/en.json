@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Context distillation",
-    "description": "Turns a finished turn into a durable task checkpoint, and optionally spends one bounded request to propose memory records."
+    "description": "Turns a finished turn into a durable task checkpoint, optionally spends one bounded request to propose memory records, and after a zero-hit recall may spend one more bounded request to learn retrieval aliases and synonym groups."
   }
 }
